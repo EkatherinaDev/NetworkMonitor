@@ -11,6 +11,7 @@ internal sealed partial class NetworkScanner
 {
     private const int PingTimeoutMilliseconds = 800;
     private const int PortTimeoutMilliseconds = 300;
+    private const int NameQueryTimeoutMilliseconds = 1000;
     private const int MaxPingParallelism = 128;
     private const int MaxEnrichmentParallelism = 48;
     private const int MaxSubnetAddresses = 1024;
@@ -88,7 +89,61 @@ internal sealed partial class NetworkScanner
             DateTime.Now);
     }
 
+    public async Task<NetworkScanResult> CheckAddressesAsync(
+        IEnumerable<string> ipAddresses,
+        string source,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var scanTargets = ipAddresses
+            .Where(value => ManualIpStore.TryNormalize(value, out _))
+            .Select(IPAddress.Parse)
+            .DistinctBy(address => address.ToString())
+            .OrderBy(ToSortableUInt32)
+            .ToList();
+
+        var scannedAddressSet = scanTargets.Select(address => address.ToString()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (scanTargets.Count == 0)
+        {
+            return new NetworkScanResult([], scannedAddressSet, new HashSet<string>(StringComparer.OrdinalIgnoreCase), DateTime.Now);
+        }
+
+        var arpCache = await ReadArpCacheAsync(cancellationToken);
+        var devices = new ConcurrentBag<NetworkDevice>();
+        var completedCount = 0;
+
+        progress?.Report(new ScanProgress("Проверка серверов...", 0, scanTargets.Count));
+
+        await Parallel.ForEachAsync(
+            scanTargets,
+            new ParallelOptions { MaxDegreeOfParallelism = MaxEnrichmentParallelism, CancellationToken = cancellationToken },
+            async (address, token) =>
+            {
+                var device = await CheckServerIpAsync(address, source, arpCache, token);
+
+                devices.Add(device);
+
+                var completed = Interlocked.Increment(ref completedCount);
+                progress?.Report(new ScanProgress($"Проверено серверов: {completed} из {scanTargets.Count}", completed, scanTargets.Count));
+            });
+
+        return new NetworkScanResult(
+            devices.OrderByDescending(device => device.IsServer).ThenBy(device => ToSortableUInt32(IPAddress.Parse(device.IpAddress))).ToList(),
+            scannedAddressSet,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            DateTime.Now);
+    }
+
     public async Task<NetworkDevice> CheckIpAsync(IPAddress address, string source, CancellationToken cancellationToken)
+    {
+        return await CheckIpAsync(address, source, requireServerNameResponse: false, cancellationToken);
+    }
+
+    public async Task<NetworkDevice> CheckIpAsync(
+        IPAddress address,
+        string source,
+        bool requireServerNameResponse,
+        CancellationToken cancellationToken)
     {
         if (!await PingAsync(address, cancellationToken))
         {
@@ -96,7 +151,15 @@ internal sealed partial class NetworkScanner
         }
 
         var arpCache = await ReadArpCacheAsync(cancellationToken);
-        return await BuildOnlineDeviceAsync(address, source, arpCache, cancellationToken);
+        var device = await BuildOnlineDeviceAsync(address, source, arpCache, cancellationToken);
+        if (requireServerNameResponse && !device.NameResponded)
+        {
+            device.IsOnline = false;
+            device.IsServer = true;
+            device.Source = $"{source} (нет ответа имени)";
+        }
+
+        return device;
     }
 
     public static uint ToSortableUInt32(IPAddress address)
@@ -133,22 +196,52 @@ internal sealed partial class NetworkScanner
         IReadOnlyDictionary<string, string> arpCache,
         CancellationToken cancellationToken)
     {
-        var hostName = await ResolveHostNameAsync(address, cancellationToken);
+        var directHostName = await QueryNetBiosNameAsync(address, cancellationToken);
+        var hostName = !string.IsNullOrWhiteSpace(directHostName)
+            ? directHostName
+            : await ResolveHostNameAsync(address, cancellationToken);
+
         var openPorts = await FindOpenServerPortsAsync(address, cancellationToken);
         var isServer = LooksLikeServer(hostName, openPorts);
         var ipText = address.ToString();
+        var nameResponded = !string.IsNullOrWhiteSpace(directHostName);
 
         return new NetworkDevice
         {
             IpAddress = ipText,
             HostName = string.IsNullOrWhiteSpace(hostName) ? "Неизвестное устройство" : hostName,
             MacAddress = arpCache.TryGetValue(ipText, out var macAddress) ? macAddress : "",
-            IsOnline = true,
+            IsOnline = !isServer || nameResponded,
             IsServer = isServer,
+            NameResponded = nameResponded,
             CheckedAt = DateTime.Now,
-            Source = source,
+            Source = isServer && !nameResponded ? $"{source} (нет ответа имени)" : source,
             OpenPorts = openPorts.Count == 0 ? "" : string.Join(", ", openPorts)
         };
+    }
+
+    private static async Task<NetworkDevice> CheckServerIpAsync(
+        IPAddress address,
+        string source,
+        IReadOnlyDictionary<string, string> arpCache,
+        CancellationToken cancellationToken)
+    {
+        if (!await PingAsync(address, cancellationToken))
+        {
+            var offlineDevice = NetworkDevice.Offline(address, source);
+            offlineDevice.IsServer = true;
+            return offlineDevice;
+        }
+
+        var device = await BuildOnlineDeviceAsync(address, source, arpCache, cancellationToken);
+        device.IsServer = true;
+        if (!device.NameResponded)
+        {
+            device.IsOnline = false;
+            device.Source = $"{source} (нет ответа имени)";
+        }
+
+        return device;
     }
 
     private static async Task<string> ResolveHostNameAsync(IPAddress address, CancellationToken cancellationToken)
@@ -175,6 +268,160 @@ internal sealed partial class NetworkScanner
 
         var firstDot = hostName.IndexOf('.');
         return firstDot > 0 ? hostName[..firstDot] : hostName;
+    }
+
+    private static async Task<string> QueryNetBiosNameAsync(IPAddress address, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = new UdpClient(AddressFamily.InterNetwork);
+            client.Client.ReceiveTimeout = NameQueryTimeoutMilliseconds;
+            client.Connect(address, 137);
+
+            var query = CreateNetBiosNodeStatusQuery();
+            await client.SendAsync(query, query.Length).WaitAsync(cancellationToken);
+
+            using var timeout = new CancellationTokenSource(NameQueryTimeoutMilliseconds);
+            using var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+            var result = await client.ReceiveAsync(linkedToken.Token);
+
+            return ParseNetBiosNodeStatusResponse(result.Buffer);
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static byte[] CreateNetBiosNodeStatusQuery()
+    {
+        var query = new byte[50];
+        var transactionId = Random.Shared.Next(0, ushort.MaxValue + 1);
+
+        query[0] = (byte)(transactionId >> 8);
+        query[1] = (byte)(transactionId & 0xFF);
+        query[5] = 1;
+        query[12] = 32;
+
+        var wildcardName = "*               ";
+        var offset = 13;
+        foreach (var value in wildcardName.Select(character => (byte)character))
+        {
+            query[offset++] = (byte)('A' + ((value >> 4) & 0x0F));
+            query[offset++] = (byte)('A' + (value & 0x0F));
+        }
+
+        query[offset++] = 0;
+        query[offset++] = 0;
+        query[offset++] = 0x21;
+        query[offset++] = 0;
+        query[offset] = 1;
+
+        return query;
+    }
+
+    private static string ParseNetBiosNodeStatusResponse(byte[] response)
+    {
+        if (response.Length < 57)
+        {
+            return "";
+        }
+
+        var answerCount = (response[6] << 8) | response[7];
+        if (answerCount == 0)
+        {
+            return "";
+        }
+
+        var offset = SkipDnsName(response, 12);
+        if (offset < 0 || offset + 4 > response.Length)
+        {
+            return "";
+        }
+
+        offset += 4;
+        for (var answerIndex = 0; answerIndex < answerCount; answerIndex++)
+        {
+            offset = SkipDnsName(response, offset);
+            if (offset < 0 || offset + 10 > response.Length)
+            {
+                return "";
+            }
+
+            var type = (response[offset] << 8) | response[offset + 1];
+            var dataLength = (response[offset + 8] << 8) | response[offset + 9];
+            offset += 10;
+
+            if (offset + dataLength > response.Length)
+            {
+                return "";
+            }
+
+            if (type == 0x21 && dataLength > 1)
+            {
+                return ParseNetBiosNames(response, offset, dataLength);
+            }
+
+            offset += dataLength;
+        }
+
+        return "";
+    }
+
+    private static int SkipDnsName(byte[] buffer, int offset)
+    {
+        while (offset < buffer.Length)
+        {
+            var length = buffer[offset++];
+            if (length == 0)
+            {
+                return offset;
+            }
+
+            if ((length & 0xC0) == 0xC0)
+            {
+                return offset + 1 <= buffer.Length ? offset + 1 : -1;
+            }
+
+            offset += length;
+        }
+
+        return -1;
+    }
+
+    private static string ParseNetBiosNames(byte[] response, int offset, int dataLength)
+    {
+        var endOffset = offset + dataLength;
+        var nameCount = response[offset++];
+        var namesEndOffset = offset + (nameCount * 18);
+        if (namesEndOffset > endOffset)
+        {
+            return "";
+        }
+
+        var fallbackName = "";
+        for (var index = 0; index < nameCount; index++)
+        {
+            var name = System.Text.Encoding.ASCII.GetString(response, offset, 15).Trim();
+            var suffix = response[offset + 15];
+            var flags = (response[offset + 16] << 8) | response[offset + 17];
+            var isGroupName = (flags & 0x8000) != 0;
+            offset += 18;
+
+            if (string.IsNullOrWhiteSpace(name) || name == "__MSBROWSE__")
+            {
+                continue;
+            }
+
+            fallbackName = string.IsNullOrWhiteSpace(fallbackName) ? name : fallbackName;
+
+            if (!isGroupName && suffix is 0x00 or 0x20)
+            {
+                return name;
+            }
+        }
+
+        return fallbackName;
     }
 
     private static async Task<IReadOnlyList<int>> FindOpenServerPortsAsync(IPAddress address, CancellationToken cancellationToken)

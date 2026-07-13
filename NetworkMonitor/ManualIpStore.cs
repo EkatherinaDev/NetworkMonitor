@@ -7,14 +7,14 @@ internal sealed class ManualIpStore
 {
     private readonly string _filePath;
 
-    public ManualIpStore()
+    public ManualIpStore(string fileName = "manual_ips.json")
     {
         var directory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "NetworkMonitor");
 
         Directory.CreateDirectory(directory);
-        _filePath = Path.Combine(directory, "manual_ips.json");
+        _filePath = Path.Combine(directory, fileName);
     }
 
     public List<string> Load()

@@ -15,6 +15,8 @@ partial class Form1
     private Button checkSelectedButton;
     private Button scanNetworkButton;
     private DataGridView devicesGrid;
+    private GroupBox eventLogGroupBox;
+    private ListBox eventLogListBox;
     private TableLayoutPanel footerLayout;
     private Label statusLabel;
     private ProgressBar scanProgressBar;
@@ -49,6 +51,8 @@ partial class Form1
         this.checkSelectedButton = new Button();
         this.scanNetworkButton = new Button();
         this.devicesGrid = new DataGridView();
+        this.eventLogGroupBox = new GroupBox();
+        this.eventLogListBox = new ListBox();
         this.footerLayout = new TableLayoutPanel();
         this.statusLabel = new Label();
         this.scanProgressBar = new ProgressBar();
@@ -57,6 +61,7 @@ partial class Form1
         this.headerLayout.SuspendLayout();
         this.actionPanel.SuspendLayout();
         ((System.ComponentModel.ISupportInitialize)(this.devicesGrid)).BeginInit();
+        this.eventLogGroupBox.SuspendLayout();
         this.footerLayout.SuspendLayout();
         this.SuspendLayout();
         // 
@@ -67,13 +72,15 @@ partial class Form1
         this.rootLayout.Controls.Add(this.headerLayout, 0, 0);
         this.rootLayout.Controls.Add(this.actionPanel, 0, 1);
         this.rootLayout.Controls.Add(this.devicesGrid, 0, 2);
-        this.rootLayout.Controls.Add(this.footerLayout, 0, 3);
+        this.rootLayout.Controls.Add(this.eventLogGroupBox, 0, 3);
+        this.rootLayout.Controls.Add(this.footerLayout, 0, 4);
         this.rootLayout.Dock = DockStyle.Fill;
         this.rootLayout.Padding = new Padding(10);
-        this.rootLayout.RowCount = 4;
+        this.rootLayout.RowCount = 5;
         this.rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         this.rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         this.rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        this.rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 150F));
         this.rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         // 
         // headerLayout
@@ -158,7 +165,7 @@ partial class Form1
         // 
         this.scanNetworkButton.AutoSize = true;
         this.scanNetworkButton.Margin = new Padding(0, 2, 0, 2);
-        this.scanNetworkButton.Text = "Сканировать сеть";
+        this.scanNetworkButton.Text = "Сканировать всю сеть";
         this.scanNetworkButton.UseVisualStyleBackColor = true;
         this.scanNetworkButton.Click += this.scanNetworkButton_Click;
         // 
@@ -180,7 +187,25 @@ partial class Form1
         this.devicesGrid.RowTemplate.Height = 30;
         this.devicesGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         this.devicesGrid.CellDoubleClick += this.devicesGrid_CellDoubleClick;
-        // 
+        //
+        // eventLogGroupBox
+        //
+        this.eventLogGroupBox.Controls.Add(this.eventLogListBox);
+        this.eventLogGroupBox.Dock = DockStyle.Fill;
+        this.eventLogGroupBox.Margin = new Padding(0, 8, 0, 0);
+        this.eventLogGroupBox.Text = "Журнал событий мониторинга";
+        //
+        // eventLogListBox
+        //
+        this.eventLogListBox.BorderStyle = BorderStyle.None;
+        this.eventLogListBox.Dock = DockStyle.Fill;
+        this.eventLogListBox.Font = new Font("Consolas", 9F);
+        this.eventLogListBox.FormattingEnabled = true;
+        this.eventLogListBox.HorizontalScrollbar = true;
+        this.eventLogListBox.IntegralHeight = false;
+        this.eventLogListBox.ItemHeight = 18;
+        this.eventLogListBox.Margin = new Padding(8);
+        //
         // footerLayout
         // 
         this.footerLayout.AutoSize = true;
@@ -212,10 +237,10 @@ partial class Form1
         // 
         this.AutoScaleDimensions = new SizeF(8F, 20F);
         this.AutoScaleMode = AutoScaleMode.Font;
-        this.ClientSize = new Size(1120, 680);
+        this.ClientSize = new Size(1120, 760);
         this.Controls.Add(this.rootLayout);
         this.Font = new Font("Segoe UI", 10F);
-        this.MinimumSize = new Size(900, 520);
+        this.MinimumSize = new Size(900, 620);
         this.StartPosition = FormStartPosition.CenterScreen;
         this.Text = "Мониторинг сети";
         this.rootLayout.ResumeLayout(false);
@@ -225,6 +250,7 @@ partial class Form1
         this.actionPanel.ResumeLayout(false);
         this.actionPanel.PerformLayout();
         ((System.ComponentModel.ISupportInitialize)(this.devicesGrid)).EndInit();
+        this.eventLogGroupBox.ResumeLayout(false);
         this.footerLayout.ResumeLayout(false);
         this.footerLayout.PerformLayout();
         this.ResumeLayout(false);

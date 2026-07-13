@@ -9,6 +9,7 @@ internal sealed class NetworkDevice
     public string MacAddress { get; set; } = "";
     public bool IsOnline { get; set; }
     public bool IsServer { get; set; }
+    public bool NameResponded { get; set; }
     public DateTime CheckedAt { get; set; } = DateTime.Now;
     public string Source { get; set; } = "Автосканирование";
     public string OpenPorts { get; set; } = "";
