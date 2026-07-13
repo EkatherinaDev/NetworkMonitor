@@ -1,0 +1,6 @@
+NetworkMonitor/bin/
+NetworkMonitor/obj/
+dist/
+artifacts/
+.vs/
+*.user
