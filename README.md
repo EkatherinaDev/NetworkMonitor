@@ -8,35 +8,41 @@ Network Monitor - Windows-приложение для контроля дост�
 
 ### Как работает проверка IP
 
-Приложение не запускает `cmd.exe`, `ping.exe`, `.bat` или `.ps1` для проверки доступности IP. Ping выполняется напрямую из C# через `System.Net.NetworkInformation.Ping.SendPingAsync`.
+Приложение не запускает `cmd.exe`, `ping.exe`, `.bat` или `.ps1` для проверки доступности IP во вкладке `Сеть`. Доступность устройств в этой таблице определяется по открытым TCP-портам через `TcpClient`.
 
-Для каждого IP используется ICMP echo request с таймаутом 800 мс. Если ответ успешный, устройство считается доступным. Если ответа нет, IP помечается как недоступный.
+Алгоритм вкладки `Сеть`: найти IP, проверить открытые порты, получить имя, сгруппировать IP с одинаковым именем в одну строку. Если у IP найден хотя бы один проверяемый открытый порт, строка считается `В сети`. Если открытых портов нет, строка считается `Недоступен`.
 
-Для серверов действует более строгая проверка. Ping сам по себе не считается достаточным: сервер должен ответить на прямой NetBIOS-запрос имени по UDP/137 или открыть хотя бы один проверяемый TCP-порт. NetBIOS-проверка аналогична `nmblookup -A <ip>`, но реализована внутри приложения на C#, без внешней утилиты `nmblookup`. Если ping проходит, но сервер не отдает имя и не имеет открытых проверяемых портов, сервер считается `Недоступен`.
+NetBIOS-проверка имени аналогична `nmblookup -A <ip>`, но реализована внутри приложения на C#, без внешней утилиты `nmblookup`. Она нужна для получения имени сервера и группировки строк, а не как единственный критерий доступности.
 
 `nmblookup` не запускается как внешний файл. Для проверки имени сервера приложение само отправляет NetBIOS Node Status request на UDP-порт 137 нужного IP-адреса и разбирает ответ.
 
 ### Как выбираются адреса для сканирования
 
-При сканировании приложение читает активные сетевые интерфейсы Windows через `NetworkInterface.GetAllNetworkInterfaces()`. Для каждого IPv4-адреса и маски вычисляется подсеть, после чего формируется список IP-адресов для проверки.
+При сканировании приложение читает активные сетевые интерфейсы Windows через `NetworkInterface.GetAllNetworkInterfaces()`. Для каждого IPv4-адреса и маски вычисляется подсеть, после чего формируется список IP-адресов для проверки портов.
 
-Если подсеть слишком большая, приложение ограничивает перебор ближайшим `/24` диапазоном, чтобы не запускать слишком тяжелое сканирование. Адреса, добавленные вручную, всегда добавляются в список ручной проверки дополнительно.
+Если подсеть слишком большая, приложение ограничивает перебор ближайшим `/24` диапазоном, чтобы не запускать слишком тяжелое сканирование. В таблицу автоматического сканирования попадают IP, у которых найден открытый проверяемый порт. Адреса, добавленные вручную, всегда проверяются и отображаются дополнительно, даже если открытых портов не найдено.
 
 ### Автоматическое и ручное сканирование
 
 Автоматическая проверка запускается таймером WinForms каждые 10 минут, но проверяются только известные IP серверов. Список серверов пополняется после ручного полного сканирования сети и после ручной проверки IP, если устройство определено как сервер.
 
-Кнопка `Сканировать всю сеть` запускает полный обход локальной сети вручную. Во время проверки интерфейс не блокируется: ping выполняется параллельно, до 128 IP одновременно.
+Кнопка `Сканировать всю сеть` запускает полный обход локальной сети вручную. Во время проверки интерфейс не блокируется: проверка портов выполняется параллельно, до 32 IP одновременно.
 
-Двойной щелчок по строке таблицы проверяет только выбранный IP. Кнопка `Проверить IP` проверяет адрес из поля ввода. Кнопка `Добавить` сохраняет IP в список ручных адресов и сразу проверяет его.
+Двойной щелчок по строке таблицы проверяет выбранную строку. Если в строке несколько IP с одинаковым именем, проверяются все IP из этой строки. Кнопка `Проверить IP` проверяет адрес из поля ввода. Кнопка `Добавить` сохраняет IP в список ручных адресов и сразу проверяет его.
+
+Правый клик по строке вкладки `Сеть` открывает контекстное меню: `Копировать`, `Редактировать`, `Удалить`, `Проверить`. Для объединенной строки редактирование, удаление и проверка применяются ко всем IP-адресам внутри этой строки.
 
 Текст из таблиц можно копировать как в обычных Windows-приложениях: Ctrl+C копирует выбранную строку, а правый клик по ячейке открывает пункт `Копировать` для конкретного значения.
 
 В нижней части окна есть `Журнал событий мониторинга`. В него пишутся запуск и завершение проверок, найденные серверы, ручные проверки, ошибки и изменения статуса устройств.
 
+При проверке выбранной строки таблицы журнал пишет подробный результат по каждому IP из этой строки. Формат: сначала `Проверка <имя>:`, затем отдельные строки вида `10.0.5.68: В сети, порты: 80, 389` или `192.170.1.7: Недоступен, открытых портов нет`.
+
 ### Как определяется имя устройства
 
-Для доступных IP программа делает reverse DNS lookup через `Dns.GetHostEntryAsync`. Если DNS возвращает полное имя, в таблице показывается короткая часть до первой точки. Если имя определить не удалось, выводится `Неизвестное устройство`.
+Для найденных IP программа сначала пытается получить имя через NetBIOS Node Status request по UDP/137, затем делает reverse DNS lookup через `Dns.GetHostEntryAsync`. Если DNS возвращает полное имя, в таблице показывается короткая часть до первой точки. Если имя определить не удалось, выводится `Неизвестное устройство`.
+
+Если несколько IP-адресов возвращают одинаковое имя, они показываются в одной строке таблицы: `имя - IP-адреса - MAC-адреса - открытые порты - статус - ...`. IP без определенного имени не объединяются между собой, чтобы разные неизвестные устройства не смешивались в одну строку.
 
 ### Как определяется MAC-адрес
 
@@ -53,13 +59,13 @@ arp.exe -a
 Сервер определяется эвристически. Устройство считается вероятным сервером, если выполняется одно из условий:
 
 - имя содержит признаки сервера: `server`, `srv`, `dc`, `sql`, `db`, `1c`, `ksc`, `mail`, `exchange`, `nas`, `storage`, `backup`, `terminal`, `rdp`, `web`, `app`;
-- открыт один из серверных портов: `22`, `25`, `53`, `80`, `389`, `443`, `636`, `1433`, `1521`, `3306`, `3389`, `5432`, `8080`, `8443`.
+- открыт один из проверяемых TCP-портов: `22`, `25`, `53`, `80`, `110`, `143`, `389`, `443`, `465`, `587`, `636`, `993`, `995`, `1433`, `1521`, `3306`, `3389`, `5432`, `8080`, `8443`.
 
 Проверка портов выполняется через `TcpClient`, без запуска внешних утилит. Таймаут подключения к одному порту - 300 мс.
 
 Вероятные серверы сортируются вверху таблицы и выделяются жирным шрифтом.
 
-Статус `В сети` для сервера ставится, если сервер ответил именем или у него найден хотя бы один открытый проверяемый TCP-порт. Это защищает от ситуации, когда зависший сервер продолжает отвечать на ICMP ping, но уже не отвечает на сетевые запросы имени и портов.
+Статус `В сети` ставится только при наличии хотя бы одного открытого проверяемого TCP-порта. Это защищает от ситуации, когда зависший сервер продолжает отвечать на ICMP ping, но рабочие сетевые службы уже не отвечают.
 
 ### Где хранятся IP-адреса
 
@@ -134,6 +140,8 @@ DNS-имя или IP сервиса не определяется автомат
 
 ### Установка и удаление
 
+Подробная инструкция для компьютеров пользователей находится в [INSTALL_RU.md](INSTALL_RU.md).
+
 Готовые файлы находятся в папке `artifacts`:
 
 - `NetworkMonitorSetup-x64.exe`
@@ -180,35 +188,41 @@ Network Monitor is a Windows desktop application for checking device availabilit
 
 ### How IP Checks Work
 
-The application does not run `cmd.exe`, `ping.exe`, `.bat`, or `.ps1` files to check IP availability. Ping is executed directly from C# by using `System.Net.NetworkInformation.Ping.SendPingAsync`.
+The application does not run `cmd.exe`, `ping.exe`, `.bat`, or `.ps1` files to check IP availability on the `Сеть` tab. Device availability in this table is determined by open TCP ports through `TcpClient`.
 
-Each IP receives an ICMP echo request with an 800 ms timeout. A successful reply marks the device as online. If no reply is received, the IP is marked as unavailable.
+The `Сеть` tab algorithm is: find IP addresses, check open ports, resolve names, then group IP addresses with the same name into one row. If an IP has at least one checked TCP port open, the row is marked online. If no checked port is open, it is marked unavailable.
 
-Servers use a stricter check. Ping alone is not enough: a server must answer a direct NetBIOS name request over UDP/137 or have at least one checked TCP port open. The NetBIOS check is equivalent to the idea of `nmblookup -A <ip>`, but it is implemented inside the C# application, without requiring the external `nmblookup` utility. If ping succeeds but the server returns no name and has no checked open ports, the server is treated as unavailable.
+The NetBIOS name check is equivalent to the idea of `nmblookup -A <ip>`, but it is implemented inside the C# application, without requiring the external `nmblookup` utility. It is used to obtain server names and group rows, not as the only availability criterion.
 
 `nmblookup` is not started as an external executable. For server name verification, the application sends its own NetBIOS Node Status request to UDP port 137 of the target IP and parses the response.
 
 ### How Scan Targets Are Selected
 
-During a scan, the application reads active Windows network interfaces by using `NetworkInterface.GetAllNetworkInterfaces()`. For each IPv4 address and subnet mask, it calculates the subnet and builds a list of IP addresses to check.
+During a scan, the application reads active Windows network interfaces by using `NetworkInterface.GetAllNetworkInterfaces()`. For each IPv4 address and subnet mask, it calculates the subnet and builds a list of IP addresses for port checks.
 
-If a subnet is too large, enumeration is limited to the nearest `/24` range to avoid an overly heavy scan. Manually added IP addresses are always included in manual checks.
+If a subnet is too large, enumeration is limited to the nearest `/24` range to avoid an overly heavy scan. Automatic scan results include IP addresses that have at least one checked TCP port open. Manually added IP addresses are always checked and displayed additionally, even when no checked port is open.
 
 ### Automatic and Manual Scanning
 
 Automatic checking is started by a WinForms timer every 10 minutes, but only known server IP addresses are checked. The server list is populated after a manual full network scan and after a manual IP check when the device is detected as a server.
 
-The `Сканировать всю сеть` button starts a full local network scan manually. The UI remains responsive because ping checks run in parallel, up to 128 IP addresses at a time.
+The `Сканировать всю сеть` button starts a full local network scan manually. The UI remains responsive because port checks run in parallel, up to 32 IP addresses at a time.
 
-Double-clicking a table row checks only the selected IP. The `Проверить IP` button checks the address from the input field. The `Добавить` button saves the IP to the manual list and checks it immediately.
+Double-clicking a table row checks that row. If the row contains several IP addresses with the same hostname, all IP addresses in that row are checked. The `Проверить IP` button checks the address from the input field. The `Добавить` button saves the IP to the manual list and checks it immediately.
+
+Right-clicking a row on the `Сеть` tab opens a context menu: `Копировать`, `Редактировать`, `Удалить`, `Проверить`. For a grouped row, edit, delete, and check actions apply to all IP addresses inside that row.
 
 The lower part of the window contains the monitoring event log. It records scan starts and finishes, discovered servers, manual checks, errors, and device status changes.
+
+When a selected table row is checked, the event log records a detailed result for each IP address in that row. The format is `Проверка <name>:` followed by lines such as `10.0.5.68: В сети, порты: 80, 389` or `192.170.1.7: Недоступен, открытых портов нет`.
 
 Table text can be copied like in regular Windows applications: Ctrl+C copies the selected row, and right-clicking a cell opens a `Копировать` item for that exact value.
 
 ### Hostname Detection
 
-For online IP addresses, the application performs a reverse DNS lookup by using `Dns.GetHostEntryAsync`. If DNS returns a full hostname, only the short name before the first dot is displayed. If no name can be resolved, the UI shows `Неизвестное устройство`.
+For discovered IP addresses, the application first tries a NetBIOS Node Status request over UDP/137, then performs a reverse DNS lookup by using `Dns.GetHostEntryAsync`. If DNS returns a full hostname, only the short name before the first dot is displayed. If no name can be resolved, the UI shows `Неизвестное устройство`.
+
+If several IP addresses return the same hostname, they are displayed in one table row: `name - IP addresses - MAC addresses - open ports - status - ...`. IP addresses without a resolved hostname are not grouped together, so unrelated unknown devices are not mixed into one row.
 
 ### MAC Address Detection
 
@@ -225,13 +239,13 @@ The output is parsed with a regular expression. This is not used for ping checks
 Server detection is heuristic. A device is treated as a probable server when at least one condition is true:
 
 - the hostname contains server-like tokens: `server`, `srv`, `dc`, `sql`, `db`, `1c`, `ksc`, `mail`, `exchange`, `nas`, `storage`, `backup`, `terminal`, `rdp`, `web`, `app`;
-- one of the known server ports is open: `22`, `25`, `53`, `80`, `389`, `443`, `636`, `1433`, `1521`, `3306`, `3389`, `5432`, `8080`, `8443`.
+- one of the checked TCP ports is open: `22`, `25`, `53`, `80`, `110`, `143`, `389`, `443`, `465`, `587`, `636`, `993`, `995`, `1433`, `1521`, `3306`, `3389`, `5432`, `8080`, `8443`.
 
 Port checks are performed through `TcpClient`, without external tools. The connection timeout for one port is 300 ms.
 
 Probable servers are sorted to the top of the table and displayed in bold.
 
-The `В сети` status for a server is set when the server answers with its name or has at least one checked TCP port open. This avoids treating a hung server as online just because it still replies to ICMP ping but no longer answers name or port checks.
+The `В сети` status is set only when at least one checked TCP port is open. This avoids treating a hung server as online just because it still replies to ICMP ping while its network services no longer respond.
 
 ### IP Storage
 

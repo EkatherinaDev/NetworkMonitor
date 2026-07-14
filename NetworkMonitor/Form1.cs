@@ -5,6 +5,7 @@ namespace NetworkMonitor;
 public partial class Form1 : Form
 {
     private const int MaxEventLogItems = 500;
+    private static readonly char[] IpAddressSeparators = [';', ',', '\r', '\n', '\t', ' '];
     private static readonly char[] ServiceAddressSeparators = [';', ',', '\r', '\n', '\t'];
 
     private readonly NetworkScanner _scanner = new();
@@ -30,6 +31,9 @@ public partial class Form1 : Form
     private ContextMenuStrip serviceContextMenu = null!;
     private ContextMenuStrip eventLogContextMenu = null!;
     private ToolStripMenuItem copyDeviceCellMenuItem = null!;
+    private ToolStripMenuItem editDeviceMenuItem = null!;
+    private ToolStripMenuItem deleteDeviceMenuItem = null!;
+    private ToolStripMenuItem checkDeviceMenuItem = null!;
     private ToolStripMenuItem copyServiceCellMenuItem = null!;
     private ToolStripMenuItem copyEventLogMenuItem = null!;
     private ToolStripMenuItem editServiceMenuItem = null!;
@@ -76,9 +80,9 @@ public partial class Form1 : Form
         devicesGrid.Columns.Clear();
         devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Type", HeaderText = "Тип", Width = 105 });
         devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "Имя / описание", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 180 });
-        devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Ip", HeaderText = "IP-адрес", Width = 130 });
-        devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Mac", HeaderText = "MAC-адрес", Width = 150 });
-        devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Ports", HeaderText = "Открытые порты", Width = 145 });
+        devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Ip", HeaderText = "IP-адреса", Width = 190 });
+        devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Mac", HeaderText = "MAC-адреса", Width = 170 });
+        devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Ports", HeaderText = "Открытые порты", Width = 160 });
         devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "Статус", Width = 115 });
         devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "CheckedAt", HeaderText = "Проверено", Width = 105 });
         devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Source", HeaderText = "Источник", Width = 135 });
@@ -88,9 +92,25 @@ public partial class Form1 : Form
     {
         var contextMenu = new ContextMenuStrip();
         copyDeviceCellMenuItem = new ToolStripMenuItem("Копировать");
+        editDeviceMenuItem = new ToolStripMenuItem("Редактировать");
+        deleteDeviceMenuItem = new ToolStripMenuItem("Удалить");
+        checkDeviceMenuItem = new ToolStripMenuItem("Проверить");
+
         copyDeviceCellMenuItem.Click += (_, _) => CopyCurrentGridCell(devicesGrid);
-        contextMenu.Items.Add(copyDeviceCellMenuItem);
-        contextMenu.Opening += (_, e) => e.Cancel = devicesGrid.CurrentCell is null;
+        editDeviceMenuItem.Click += editDeviceMenuItem_Click;
+        deleteDeviceMenuItem.Click += deleteDeviceMenuItem_Click;
+        checkDeviceMenuItem.Click += checkDeviceMenuItem_Click;
+
+        contextMenu.Items.AddRange([
+            copyDeviceCellMenuItem,
+            new ToolStripSeparator(),
+            editDeviceMenuItem,
+            deleteDeviceMenuItem,
+            new ToolStripSeparator(),
+            checkDeviceMenuItem
+        ]);
+
+        contextMenu.Opening += (_, e) => e.Cancel = GetSelectedDeviceGroup() is null;
         return contextMenu;
     }
 
@@ -396,6 +416,11 @@ public partial class Form1 : Form
         return servicesGrid.CurrentRow?.Tag as ServiceEndpoint;
     }
 
+    private NetworkDeviceGroup? GetSelectedDeviceGroup()
+    {
+        return devicesGrid.CurrentRow?.Tag as NetworkDeviceGroup;
+    }
+
     private void SelectServiceRow(ServiceEndpoint service)
     {
         foreach (DataGridViewRow row in servicesGrid.Rows)
@@ -604,6 +629,265 @@ public partial class Form1 : Form
         return dialog.ShowDialog(this) == DialogResult.OK;
     }
 
+    private bool EditDeviceGroup(NetworkDeviceGroup group)
+    {
+        using var dialog = new Form
+        {
+            AutoScaleMode = AutoScaleMode.Font,
+            ClientSize = new Size(560, 230),
+            Font = Font,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.CenterParent,
+            Text = "Редактировать строку"
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12)
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var nameLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 6, 8, 6),
+            Text = "Имя / описание:"
+        };
+        var nameBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 3, 0, 3),
+            PlaceholderText = NetworkDevice.UnknownHostName,
+            Text = group.HostName.Equals(NetworkDevice.UnknownHostName, StringComparison.OrdinalIgnoreCase) ? "" : group.HostName
+        };
+
+        var ipLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 6, 8, 6),
+            Text = "IP-адреса:"
+        };
+        var ipBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 3, 0, 3),
+            Multiline = true,
+            ScrollBars = ScrollBars.Vertical,
+            Text = string.Join(Environment.NewLine, group.Devices.Select(device => device.IpAddress))
+        };
+
+        var buttonsPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            Margin = new Padding(0, 12, 0, 0)
+        };
+
+        var saveButton = new Button
+        {
+            AutoSize = true,
+            Text = "Сохранить",
+            UseVisualStyleBackColor = true
+        };
+        var cancelButton = new Button
+        {
+            AutoSize = true,
+            DialogResult = DialogResult.Cancel,
+            Text = "Отмена",
+            UseVisualStyleBackColor = true
+        };
+
+        saveButton.Click += (_, _) =>
+        {
+            var updatedName = nameBox.Text.Trim();
+            if (string.IsNullOrWhiteSpace(updatedName))
+            {
+                updatedName = NetworkDevice.UnknownHostName;
+            }
+
+            if (!TryParseIpAddressList(ipBox.Text, out var updatedIpAddresses, out var invalidValue))
+            {
+                MessageBox.Show($"Некорректный IPv4-адрес: {invalidValue}", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                ipBox.Focus();
+                return;
+            }
+
+            if (updatedIpAddresses.Count == 0)
+            {
+                MessageBox.Show("Введите хотя бы один IPv4-адрес.", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                ipBox.Focus();
+                return;
+            }
+
+            var oldIpAddresses = group.Devices.Select(device => device.IpAddress).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var existingIp = updatedIpAddresses.FirstOrDefault(ipAddress =>
+                _devices.ContainsKey(ipAddress) && !oldIpAddresses.Contains(ipAddress));
+            if (existingIp is not null)
+            {
+                MessageBox.Show($"IP-адрес {existingIp} уже есть в списке.", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                ipBox.Focus();
+                return;
+            }
+
+            ApplyDeviceGroupEdit(group, updatedName, updatedIpAddresses);
+            dialog.DialogResult = DialogResult.OK;
+            dialog.Close();
+        };
+
+        buttonsPanel.Controls.Add(saveButton);
+        buttonsPanel.Controls.Add(cancelButton);
+
+        layout.Controls.Add(nameLabel, 0, 0);
+        layout.Controls.Add(nameBox, 1, 0);
+        layout.Controls.Add(ipLabel, 0, 1);
+        layout.Controls.Add(ipBox, 1, 1);
+        layout.Controls.Add(buttonsPanel, 0, 2);
+        layout.SetColumnSpan(buttonsPanel, 2);
+
+        dialog.AcceptButton = saveButton;
+        dialog.CancelButton = cancelButton;
+        dialog.Controls.Add(layout);
+
+        return dialog.ShowDialog(this) == DialogResult.OK;
+    }
+
+    private void ApplyDeviceGroupEdit(NetworkDeviceGroup group, string updatedName, IReadOnlyList<string> updatedIpAddresses)
+    {
+        var oldIpAddresses = group.Devices
+            .Select(device => device.IpAddress)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var updatedIpSet = updatedIpAddresses.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var oldIpAddress in oldIpAddresses.Where(ipAddress => !updatedIpSet.Contains(ipAddress)))
+        {
+            _devices.Remove(oldIpAddress);
+        }
+
+        foreach (var ipAddress in updatedIpAddresses)
+        {
+            if (!_devices.TryGetValue(ipAddress, out var device))
+            {
+                device = new NetworkDevice
+                {
+                    IpAddress = ipAddress,
+                    CheckedAt = DateTime.Now
+                };
+                _devices[ipAddress] = device;
+            }
+
+            device.HostName = updatedName;
+            device.Source = "Вручную";
+            device.IsServer = device.IsServer || group.IsServer;
+        }
+
+        ReplaceAddresses(_manualIpAddresses, oldIpAddresses, updatedIpAddresses);
+        _manualIpStore.Save(_manualIpAddresses);
+        _manualIpAddresses.Clear();
+        _manualIpAddresses.AddRange(_manualIpStore.Load());
+
+        ReplaceAddresses(_serverIpAddresses, oldIpAddresses, group.IsServer ? updatedIpAddresses : []);
+        _serverIpStore.Save(_serverIpAddresses);
+        _serverIpAddresses.Clear();
+        _serverIpAddresses.AddRange(_serverIpStore.Load());
+
+        AddEventLog($"Строка изменена: {group.HostName} -> {updatedName} ({string.Join("; ", updatedIpAddresses)}).");
+    }
+
+    private void DeleteDeviceGroup(NetworkDeviceGroup group)
+    {
+        var ipAddresses = group.Devices
+            .Select(device => device.IpAddress)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => NetworkScanner.ToSortableUInt32(IPAddress.Parse(value)))
+            .ToList();
+
+        var result = MessageBox.Show(
+            $"Удалить строку \"{group.HostName}\"?\n\nIP: {string.Join("; ", ipAddresses)}",
+            Text,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        foreach (var ipAddress in ipAddresses)
+        {
+            _devices.Remove(ipAddress);
+        }
+
+        var changedManual = RemoveAddresses(_manualIpAddresses, ipAddresses);
+        if (changedManual)
+        {
+            _manualIpStore.Save(_manualIpAddresses);
+        }
+
+        var changedServers = RemoveAddresses(_serverIpAddresses, ipAddresses);
+        if (changedServers)
+        {
+            _serverIpStore.Save(_serverIpAddresses);
+        }
+
+        RenderDevices();
+        AddEventLog($"Строка удалена: {group.HostName} ({string.Join("; ", ipAddresses)}).");
+        statusLabel.Text = $"Удалено IP из списка: {ipAddresses.Count}";
+    }
+
+    private static bool TryParseIpAddressList(string value, out List<string> ipAddresses, out string invalidValue)
+    {
+        ipAddresses = [];
+        invalidValue = "";
+
+        foreach (var item in value.Split(IpAddressSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!ManualIpStore.TryNormalize(item, out var normalized))
+            {
+                invalidValue = item;
+                return false;
+            }
+
+            if (!ipAddresses.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+            {
+                ipAddresses.Add(normalized);
+            }
+        }
+
+        return true;
+    }
+
+    private static void ReplaceAddresses(List<string> target, IEnumerable<string> oldIpAddresses, IEnumerable<string> newIpAddresses)
+    {
+        RemoveAddresses(target, oldIpAddresses);
+        foreach (var ipAddress in newIpAddresses)
+        {
+            if (!target.Contains(ipAddress, StringComparer.OrdinalIgnoreCase))
+            {
+                target.Add(ipAddress);
+            }
+        }
+    }
+
+    private static bool RemoveAddresses(List<string> target, IEnumerable<string> ipAddresses)
+    {
+        var ipAddressSet = ipAddresses.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return target.RemoveAll(ipAddress => ipAddressSet.Contains(ipAddress)) > 0;
+    }
+
     private List<string> GetServerIpAddresses()
     {
         return _serverIpAddresses
@@ -651,6 +935,27 @@ public partial class Form1 : Form
 
         eventLogListBox.Items.Add($"[{DateTime.Now:HH:mm:ss}] {message}");
         eventLogListBox.TopIndex = eventLogListBox.Items.Count - 1;
+    }
+
+    private void AddDeviceCheckDetailsToEventLog(string title, IEnumerable<NetworkDevice> devices)
+    {
+        AddEventLog($"Проверка {title}:");
+
+        foreach (var device in devices.OrderBy(device => NetworkScanner.ToSortableUInt32(IPAddress.Parse(device.IpAddress))))
+        {
+            AddEventLog(FormatDeviceCheckLog(device));
+        }
+    }
+
+    private static string FormatDeviceCheckLog(NetworkDevice device)
+    {
+        if (!device.IsOnline)
+        {
+            return $"{device.IpAddress}: Недоступен, открытых портов нет";
+        }
+
+        var ports = string.IsNullOrWhiteSpace(device.OpenPorts) ? "нет данных" : device.OpenPorts;
+        return $"{device.IpAddress}: В сети, порты: {ports}";
     }
 
     private bool IsKnownServerIp(string ipAddress)
@@ -737,8 +1042,8 @@ public partial class Form1 : Form
             ApplyScanResult(result);
             RememberServerAddresses(result.Devices.Where(device => device.IsServer));
             lastUpdateLabel.Text = $"Последнее обновление: {result.CompletedAt:HH:mm:ss}";
-            statusLabel.Text = $"Готово. Найдено устройств: {result.Devices.Count}";
-            AddEventLog($"Сканирование всей сети завершено. Найдено устройств: {result.Devices.Count}, серверов: {result.Devices.Count(device => device.IsServer)}.");
+            statusLabel.Text = $"Готово. Найдено IP с открытыми портами: {result.Devices.Count}";
+            AddEventLog($"Сканирование всей сети завершено. Найдено IP с открытыми портами: {result.Devices.Count}, серверов: {result.Devices.Count(device => device.IsServer)}.");
         }
         catch (OperationCanceledException)
         {
@@ -779,8 +1084,9 @@ public partial class Form1 : Form
                 var wasOnline = existingDevice.IsOnline;
                 existingDevice.IsOnline = false;
                 existingDevice.NameResponded = false;
+                existingDevice.OpenPorts = "";
                 existingDevice.CheckedAt = result.CompletedAt;
-                existingDevice.Source = result.ManualAddresses.Contains(address) ? "Вручную" : existingDevice.Source;
+                existingDevice.Source = result.ManualAddresses.Contains(address) ? "Вручную (нет открытых портов)" : "Автосканирование (нет открытых портов)";
 
                 if (wasOnline)
                 {
@@ -792,7 +1098,7 @@ public partial class Form1 : Form
                 _devices[normalized] = new NetworkDevice
                 {
                     IpAddress = normalized,
-                    HostName = "Неизвестное устройство",
+                    HostName = NetworkDevice.UnknownHostName,
                     IsOnline = false,
                     CheckedAt = result.CompletedAt,
                     Source = "Вручную"
@@ -845,6 +1151,52 @@ public partial class Form1 : Form
         }
     }
 
+    private async Task CheckDeviceGroupAsync(NetworkDeviceGroup group)
+    {
+        var ipAddresses = group.Devices
+            .Select(device => device.IpAddress)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => NetworkScanner.ToSortableUInt32(IPAddress.Parse(value)))
+            .ToList();
+
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(8, ipAddresses.Count * 3)));
+        SetManualCheckState(false, $"Проверка {ipAddresses.Count} IP...");
+
+        try
+        {
+            var progress = new Progress<ScanProgress>(UpdateProgress);
+            var result = await _scanner.CheckAddressesAsync(ipAddresses, "Ручная проверка", progress, cancellation.Token, forceServer: group.IsServer);
+
+            foreach (var device in result.Devices)
+            {
+                device.IsServer = device.IsServer || group.IsServer;
+                UpsertDevice(device);
+            }
+
+            RememberServerAddresses(result.Devices.Where(device => device.IsServer));
+            RenderDevices();
+            lastUpdateLabel.Text = $"Последняя проверка: {DateTime.Now:HH:mm:ss}";
+
+            var onlineCount = result.Devices.Count(device => device.IsOnline);
+            var offlineCount = result.Devices.Count - onlineCount;
+            statusLabel.Text = $"{group.HostName}: в сети {onlineCount}, недоступно {offlineCount}";
+            AddDeviceCheckDetailsToEventLog(group.HostName, result.Devices);
+            AddEventLog($"Ручная проверка {group.HostName}: в сети {onlineCount}, недоступно {offlineCount}.");
+        }
+        catch (OperationCanceledException)
+        {
+            statusLabel.Text = $"Проверка {group.HostName} остановлена по таймауту.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Ошибка проверки IP: {ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetManualCheckState(true, "");
+        }
+    }
+
     private void UpsertDevice(NetworkDevice device)
     {
         if (_devices.TryGetValue(device.IpAddress, out var existingDevice))
@@ -853,11 +1205,12 @@ public partial class Form1 : Form
             var wasServer = existingDevice.IsServer;
             var preservedServerFlag = existingDevice.IsServer && !device.IsOnline;
 
-            if (device.IsOnline)
+            existingDevice.HostName = NetworkDevice.MergeHostNames(existingDevice.HostName, device.HostName);
+            existingDevice.OpenPorts = device.OpenPorts;
+
+            if (!string.IsNullOrWhiteSpace(device.MacAddress))
             {
-                existingDevice.HostName = device.HostName;
                 existingDevice.MacAddress = device.MacAddress;
-                existingDevice.OpenPorts = device.OpenPorts;
             }
 
             existingDevice.IsOnline = device.IsOnline;
@@ -891,34 +1244,49 @@ public partial class Form1 : Form
         devicesGrid.SuspendLayout();
         devicesGrid.Rows.Clear();
 
-        foreach (var device in _devices.Values
-            .OrderByDescending(device => device.IsServer)
-            .ThenByDescending(device => device.IsOnline)
-            .ThenBy(device => NetworkScanner.ToSortableUInt32(IPAddress.Parse(device.IpAddress))))
+        foreach (var group in BuildDeviceGroups())
         {
             var rowIndex = devicesGrid.Rows.Add(
-                device.TypeText,
-                device.HostName,
-                device.IpAddress,
-                device.MacAddress,
-                device.OpenPorts,
-                device.StatusText,
-                device.CheckedAtText,
-                device.Source);
+                group.TypeText,
+                group.HostName,
+                group.IpAddresses,
+                group.MacAddresses,
+                group.OpenPorts,
+                group.StatusText,
+                group.CheckedAtText,
+                group.Source);
 
             var row = devicesGrid.Rows[rowIndex];
-            row.Tag = device;
+            row.Tag = group;
 
-            if (device.IsServer)
+            if (group.IsServer)
             {
                 row.DefaultCellStyle.BackColor = Color.FromArgb(232, 244, 255);
                 row.DefaultCellStyle.Font = _serverRowFont;
             }
 
-            row.Cells["Status"].Style.ForeColor = device.IsOnline ? Color.ForestGreen : Color.Firebrick;
+            row.Cells["Status"].Style.ForeColor = group.IsOnline ? Color.ForestGreen : Color.Firebrick;
         }
 
         devicesGrid.ResumeLayout();
+    }
+
+    private List<NetworkDeviceGroup> BuildDeviceGroups()
+    {
+        return _devices.Values
+            .GroupBy(GetDeviceGroupKey, StringComparer.OrdinalIgnoreCase)
+            .Select(NetworkDeviceGroup.Create)
+            .OrderByDescending(group => group.IsServer)
+            .ThenByDescending(group => group.IsOnline)
+            .ThenBy(group => NetworkScanner.ToSortableUInt32(IPAddress.Parse(group.PrimaryDevice.IpAddress)))
+            .ToList();
+    }
+
+    private static string GetDeviceGroupKey(NetworkDevice device)
+    {
+        return device.HasKnownHostName
+            ? $"name:{device.HostName.Trim()}"
+            : $"ip:{device.IpAddress}";
     }
 
     private void UpdateProgress(ScanProgress progress)
@@ -950,6 +1318,9 @@ public partial class Form1 : Form
         addIpButton.Enabled = enabled;
         checkIpButton.Enabled = enabled;
         checkSelectedButton.Enabled = enabled;
+        editDeviceMenuItem.Enabled = enabled;
+        deleteDeviceMenuItem.Enabled = enabled;
+        checkDeviceMenuItem.Enabled = enabled;
         if (!string.IsNullOrWhiteSpace(status))
         {
             statusLabel.Text = status;
@@ -1037,16 +1408,52 @@ public partial class Form1 : Form
 
     private async void checkSelectedButton_Click(object sender, EventArgs e)
     {
-        if (devicesGrid.CurrentRow?.Tag is not NetworkDevice device)
+        if (devicesGrid.CurrentRow?.Tag is not NetworkDeviceGroup group)
         {
             MessageBox.Show("Выберите строку с IP-адресом.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        await CheckAddressAsync(
-            device.IpAddress,
-            _manualIpAddresses.Contains(device.IpAddress, StringComparer.OrdinalIgnoreCase) ? "Вручную" : "Ручная проверка",
-            device.IsServer);
+        await CheckDeviceGroupAsync(group);
+    }
+
+    private void editDeviceMenuItem_Click(object? sender, EventArgs e)
+    {
+        var group = GetSelectedDeviceGroup();
+        if (group is null)
+        {
+            return;
+        }
+
+        if (!EditDeviceGroup(group))
+        {
+            return;
+        }
+
+        RenderDevices();
+        statusLabel.Text = "Строка изменена.";
+    }
+
+    private void deleteDeviceMenuItem_Click(object? sender, EventArgs e)
+    {
+        var group = GetSelectedDeviceGroup();
+        if (group is null)
+        {
+            return;
+        }
+
+        DeleteDeviceGroup(group);
+    }
+
+    private async void checkDeviceMenuItem_Click(object? sender, EventArgs e)
+    {
+        var group = GetSelectedDeviceGroup();
+        if (group is null)
+        {
+            return;
+        }
+
+        await CheckDeviceGroupAsync(group);
     }
 
     private async void scanNetworkButton_Click(object sender, EventArgs e)
@@ -1056,15 +1463,12 @@ public partial class Form1 : Form
 
     private async void devicesGrid_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
     {
-        if (e.RowIndex < 0 || devicesGrid.Rows[e.RowIndex].Tag is not NetworkDevice device)
+        if (e.RowIndex < 0 || devicesGrid.Rows[e.RowIndex].Tag is not NetworkDeviceGroup group)
         {
             return;
         }
 
-        await CheckAddressAsync(
-            device.IpAddress,
-            _manualIpAddresses.Contains(device.IpAddress, StringComparer.OrdinalIgnoreCase) ? "Вручную" : "Ручная проверка",
-            device.IsServer);
+        await CheckDeviceGroupAsync(group);
     }
 
     private void devicesGrid_MouseDown(object? sender, MouseEventArgs e)

@@ -32,19 +32,25 @@
 
 ### Важные архитектурные детали
 
-Ping не выполняется через `cmd`, `ping.exe`, batch-файлы или PowerShell. Используется `Ping.SendPingAsync` из .NET.
+Для вкладки `Сеть` не используйте ping как критерий доступности. Статус строки должен определяться открытыми TCP-портами через `TcpClient`. Для вкладки `Сервисы` ping допустим только через `Ping.SendPingAsync` из .NET, без `cmd`, `ping.exe`, batch-файлов или PowerShell.
 
 `arp.exe -a` запускается только для чтения ARP-кэша и показа MAC-адресов. Не используйте ARP как критерий доступности устройства.
 
-`nmblookup` не должен быть внешней зависимостью приложения. Для проверки имени сервера используется встроенный NetBIOS Node Status request по UDP/137, реализованный в `NetworkScanner`. Для серверов `ping` недостаточен: статус online ставится только при ответе имени или наличии открытого проверяемого TCP-порта.
+`nmblookup` не должен быть внешней зависимостью приложения. Для получения имени сервера используется встроенный NetBIOS Node Status request по UDP/137, реализованный в `NetworkScanner`. Имя нужно для отображения и группировки; статус online во вкладке `Сеть` ставится только при наличии открытого проверяемого TCP-порта.
 
 Проверка серверных портов выполняется через `TcpClient`. Список портов и токены имен находятся в `NetworkScanner`.
+
+Строки таблицы `Сеть` строятся через `NetworkDeviceGroup`: IP-адреса с одинаковым известным именем показываются в одной строке. `Неизвестное устройство` не группируется по имени, чтобы разные неизвестные IP оставались отдельными строками. `_devices` в `Form1` остается словарем по IP, потому что автопроверка и ручные проверки должны работать с реальными адресами.
+
+Контекстное меню `devicesGrid` должно содержать `Копировать`, `Редактировать`, `Удалить`, `Проверить`. Для `NetworkDeviceGroup` действия применяются ко всем IP внутри строки. Удаление убирает IP из текущей таблицы, `manual_ips.json` и `server_ips.json`; автоматически найденный IP может появиться снова после полного сканирования, если у него открыты порты.
 
 Автоматическая проверка запускается WinForms-таймером в `Form1`: интервал 10 минут. Таймер должен проверять только известные серверные IP, а не всю подсеть. Полный обход сети должен запускаться только вручную кнопкой `Сканировать всю сеть`.
 
 Сканирование должно оставаться асинхронным. Не блокируйте UI-поток ожиданием ping, DNS, ARP или TCP-портов.
 
 Журнал событий мониторинга находится в `Form1` и отображается через `eventLogListBox`. В журнал нужно писать запуск и завершение проверок, ошибки, найденные серверы и изменения статуса.
+
+При ручной проверке выбранной строки `devicesGrid` нужно логировать подробности по каждому IP из строки: заголовок `Проверка <имя>:` и отдельные записи `IP: В сети, порты: ...` или `IP: Недоступен, открытых портов нет`. Для этого используется `Form1.AddDeviceCheckDetailsToEventLog`.
 
 Вкладка `Сервисы` создается в `Form1.BuildTabbedLayout()`. Не ищите DNS-имя или IP сервиса обходом подсети: сервисный адрес должен быть введен пользователем или загружен из `%AppData%\NetworkMonitor\service_endpoints.json`. Автоматически определяется только IPv4 для уже заданного DNS-имени через `Dns.GetHostAddressesAsync`, затем адрес проверяется параллельно через `ServiceChecker`. Не запускайте `ping -4` через cmd; это только пользовательский аналог того, что делает код. Одна строка сервиса может содержать несколько DNS-имен или IP через `;`; `ServiceChecker` должен проверить кандидаты по очереди и вывести первый IPv4, который ответил на ping.
 
@@ -130,7 +136,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 ### Правила изменений
 
-- Не добавляйте зависимость от внешних сетевых утилит для ping.
+- Не используйте ping как критерий статуса на вкладке `Сеть`; доступность там определяется открытыми TCP-портами.
+- Не добавляйте зависимость от внешних сетевых утилит для ping на вкладке `Сервисы`.
 - Не добавляйте зависимость от внешней утилиты `nmblookup`; NetBIOS-опрос имени сервера должен оставаться встроенным в код.
 - Не добавляйте запуск `ping -4` через cmd для сервисов; используйте DNS IPv4 resolution в `ServiceChecker`.
 - Не запускайте долгие операции в UI-потоке.
@@ -172,19 +179,25 @@ This file documents the project internals for developers and future coding agent
 
 ### Important Architecture Notes
 
-Ping is not performed through `cmd`, `ping.exe`, batch files, or PowerShell. The application uses .NET `Ping.SendPingAsync`.
+For the `Сеть` tab, do not use ping as the availability criterion. Row status must be determined by open TCP ports through `TcpClient`. For the `Сервисы` tab, ping is allowed only through .NET `Ping.SendPingAsync`, without `cmd`, `ping.exe`, batch files, or PowerShell.
 
 `arp.exe -a` is launched only to read the Windows ARP cache and display MAC addresses. Do not use ARP as the source of truth for device availability.
 
-`nmblookup` must not be an external application dependency. Server name verification uses the built-in NetBIOS Node Status request over UDP/137 implemented in `NetworkScanner`. For servers, ping is not enough: online status requires a name response or a checked open TCP port.
+`nmblookup` must not be an external application dependency. Server name lookup uses the built-in NetBIOS Node Status request over UDP/137 implemented in `NetworkScanner`. The name is used for display and grouping; online status on the `Сеть` tab requires at least one checked TCP port to be open.
 
 Server port checks are performed through `TcpClient`. The port list and hostname tokens are defined in `NetworkScanner`.
+
+Rows in the `Сеть` table are built through `NetworkDeviceGroup`: IP addresses with the same known hostname are displayed in one row. `Неизвестное устройство` is not grouped by name, so unrelated unknown IP addresses remain separate rows. `_devices` in `Form1` remains keyed by IP because automatic and manual checks still need real addresses.
+
+The `devicesGrid` context menu should contain `Копировать`, `Редактировать`, `Удалить`, `Проверить`. For a `NetworkDeviceGroup`, actions apply to all IP addresses inside the row. Delete removes IP addresses from the current table, `manual_ips.json`, and `server_ips.json`; an automatically discovered IP can appear again after a full scan if it has open ports.
 
 Automatic checking is started by a WinForms timer in `Form1`: the interval is 10 minutes. The timer must check only known server IP addresses, not the whole subnet. Full network enumeration must be started only manually by the `Сканировать всю сеть` button.
 
 Scanning must remain asynchronous. Do not block the UI thread while waiting for ping, DNS, ARP, or TCP port checks.
 
 The monitoring event log is owned by `Form1` and displayed through `eventLogListBox`. It should record check starts and finishes, errors, discovered servers, and status changes.
+
+When a selected `devicesGrid` row is checked manually, log details for each IP address in that row: a `Проверка <name>:` header and separate `IP: В сети, порты: ...` or `IP: Недоступен, открытых портов нет` entries. This is handled by `Form1.AddDeviceCheckDetailsToEventLog`.
 
 The `Сервисы` tab is created in `Form1.BuildTabbedLayout()`. Do not discover service DNS names or IP addresses through subnet scanning: service addresses must be entered by the user or loaded from `%AppData%\NetworkMonitor\service_endpoints.json`. Only IPv4 resolution for an already configured DNS name is automatic through `Dns.GetHostAddressesAsync`; the result is checked in parallel through `ServiceChecker`. Do not run `ping -4` through cmd; it is only the user-facing equivalent of what the code does. A single service row may contain several DNS names or IP addresses separated by `;`; `ServiceChecker` should try candidates in order and display the first IPv4 address that replies to ping.
 
@@ -270,7 +283,8 @@ Expected artifacts:
 
 ### Change Rules
 
-- Do not add an external network utility dependency for ping.
+- Do not use ping as the status criterion on the `Сеть` tab; availability there is determined by open TCP ports.
+- Do not add an external network utility dependency for ping on the `Сервисы` tab.
 - Do not add an external `nmblookup` dependency; NetBIOS server-name probing must remain built into the code.
 - Do not launch `ping -4` through cmd for service checks; use DNS IPv4 resolution in `ServiceChecker`.
 - Do not run long operations on the UI thread.

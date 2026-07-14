@@ -9,10 +9,9 @@ namespace NetworkMonitor;
 
 internal sealed partial class NetworkScanner
 {
-    private const int PingTimeoutMilliseconds = 800;
     private const int PortTimeoutMilliseconds = 300;
     private const int NameQueryTimeoutMilliseconds = 1000;
-    private const int MaxPingParallelism = 128;
+    private const int MaxAddressProbeParallelism = 32;
     private const int MaxEnrichmentParallelism = 48;
     private const int MaxSubnetAddresses = 1024;
 
@@ -44,42 +43,33 @@ internal sealed partial class NetworkScanner
             return new NetworkScanResult([], scannedAddressSet, manualAddressSet, DateTime.Now);
         }
 
-        var onlineAddresses = new ConcurrentBag<IPAddress>();
-        var pingCompleted = 0;
+        var arpCache = await ReadArpCacheAsync(cancellationToken);
+        var devices = new ConcurrentBag<NetworkDevice>();
+        var completedCount = 0;
 
-        progress?.Report(new ScanProgress("Проверка доступности IP...", 0, scanTargets.Count));
+        progress?.Report(new ScanProgress("Поиск IP по открытым портам...", 0, scanTargets.Count));
 
         await Parallel.ForEachAsync(
             scanTargets,
-            new ParallelOptions { MaxDegreeOfParallelism = MaxPingParallelism, CancellationToken = cancellationToken },
+            new ParallelOptions { MaxDegreeOfParallelism = MaxAddressProbeParallelism, CancellationToken = cancellationToken },
             async (address, token) =>
             {
-                if (await PingAsync(address, token))
+                var addressText = address.ToString();
+                var source = manualAddressSet.Contains(addressText) ? "Вручную" : "Автосканирование";
+                var device = await ProbeDeviceAsync(
+                    address,
+                    source,
+                    arpCache,
+                    includeUnavailable: manualAddressSet.Contains(addressText),
+                    token);
+
+                if (device is not null)
                 {
-                    onlineAddresses.Add(address);
+                    devices.Add(device);
                 }
 
-                var completed = Interlocked.Increment(ref pingCompleted);
+                var completed = Interlocked.Increment(ref completedCount);
                 progress?.Report(new ScanProgress($"Проверено IP: {completed} из {scanTargets.Count}", completed, scanTargets.Count));
-            });
-
-        var arpCache = await ReadArpCacheAsync(cancellationToken);
-        var devices = new ConcurrentBag<NetworkDevice>();
-        var onlineList = onlineAddresses.OrderBy(ToSortableUInt32).ToList();
-        var enrichCompleted = 0;
-
-        progress?.Report(new ScanProgress("Определение имен и серверов...", 0, Math.Max(onlineList.Count, 1)));
-
-        await Parallel.ForEachAsync(
-            onlineList,
-            new ParallelOptions { MaxDegreeOfParallelism = MaxEnrichmentParallelism, CancellationToken = cancellationToken },
-            async (address, token) =>
-            {
-                var source = manualAddressSet.Contains(address.ToString()) ? "Вручную" : "Автосканирование";
-                devices.Add(await BuildOnlineDeviceAsync(address, source, arpCache, token));
-
-                var completed = Interlocked.Increment(ref enrichCompleted);
-                progress?.Report(new ScanProgress($"Обработано активных устройств: {completed} из {onlineList.Count}", completed, Math.Max(onlineList.Count, 1)));
             });
 
         return new NetworkScanResult(
@@ -93,7 +83,8 @@ internal sealed partial class NetworkScanner
         IEnumerable<string> ipAddresses,
         string source,
         IProgress<ScanProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool forceServer = true)
     {
         var scanTargets = ipAddresses
             .Where(value => ManualIpStore.TryNormalize(value, out _))
@@ -112,19 +103,24 @@ internal sealed partial class NetworkScanner
         var devices = new ConcurrentBag<NetworkDevice>();
         var completedCount = 0;
 
-        progress?.Report(new ScanProgress("Проверка серверов...", 0, scanTargets.Count));
+        progress?.Report(new ScanProgress(forceServer ? "Проверка серверов..." : "Проверка IP...", 0, scanTargets.Count));
 
         await Parallel.ForEachAsync(
             scanTargets,
             new ParallelOptions { MaxDegreeOfParallelism = MaxEnrichmentParallelism, CancellationToken = cancellationToken },
             async (address, token) =>
             {
-                var device = await CheckServerIpAsync(address, source, arpCache, token);
+                var device = await BuildCheckedDeviceAsync(address, source, arpCache, token);
+                if (forceServer)
+                {
+                    device.IsServer = true;
+                }
 
                 devices.Add(device);
 
                 var completed = Interlocked.Increment(ref completedCount);
-                progress?.Report(new ScanProgress($"Проверено серверов: {completed} из {scanTargets.Count}", completed, scanTargets.Count));
+                var label = forceServer ? "серверов" : "IP";
+                progress?.Report(new ScanProgress($"Проверено {label}: {completed} из {scanTargets.Count}", completed, scanTargets.Count));
             });
 
         return new NetworkScanResult(
@@ -145,18 +141,11 @@ internal sealed partial class NetworkScanner
         bool requireServerNameResponse,
         CancellationToken cancellationToken)
     {
-        if (!await PingAsync(address, cancellationToken))
-        {
-            return NetworkDevice.Offline(address, source);
-        }
-
         var arpCache = await ReadArpCacheAsync(cancellationToken);
-        var device = await BuildOnlineDeviceAsync(address, source, arpCache, cancellationToken);
-        if (requireServerNameResponse && !HasServerResponse(device))
+        var device = await BuildCheckedDeviceAsync(address, source, arpCache, cancellationToken);
+        if (requireServerNameResponse)
         {
-            device.IsOnline = false;
             device.IsServer = true;
-            device.Source = $"{source} (нет ответа имени/портов)";
         }
 
         return device;
@@ -176,78 +165,52 @@ internal sealed partial class NetworkScanner
             | bytes[3];
     }
 
-    private static async Task<bool> PingAsync(IPAddress address, CancellationToken cancellationToken)
-    {
-        try
-        {
-            using var ping = new Ping();
-            var reply = await ping.SendPingAsync(address, PingTimeoutMilliseconds).WaitAsync(cancellationToken);
-            return reply.Status == IPStatus.Success;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static async Task<NetworkDevice> BuildOnlineDeviceAsync(
+    private static async Task<NetworkDevice?> ProbeDeviceAsync(
         IPAddress address,
         string source,
         IReadOnlyDictionary<string, string> arpCache,
+        bool includeUnavailable,
         CancellationToken cancellationToken)
     {
+        var openPorts = await FindOpenServerPortsAsync(address, cancellationToken);
+        if (openPorts.Count == 0 && !includeUnavailable)
+        {
+            return null;
+        }
+
+        return await BuildCheckedDeviceAsync(address, source, arpCache, cancellationToken, openPorts);
+    }
+
+    private static async Task<NetworkDevice> BuildCheckedDeviceAsync(
+        IPAddress address,
+        string source,
+        IReadOnlyDictionary<string, string> arpCache,
+        CancellationToken cancellationToken,
+        IReadOnlyList<int>? checkedOpenPorts = null)
+    {
+        var openPorts = checkedOpenPorts ?? await FindOpenServerPortsAsync(address, cancellationToken);
         var directHostName = await QueryNetBiosNameAsync(address, cancellationToken);
         var hostName = !string.IsNullOrWhiteSpace(directHostName)
             ? directHostName
             : await ResolveHostNameAsync(address, cancellationToken);
 
-        var openPorts = await FindOpenServerPortsAsync(address, cancellationToken);
         var isServer = LooksLikeServer(hostName, openPorts);
         var ipText = address.ToString();
         var nameResponded = !string.IsNullOrWhiteSpace(directHostName);
-        var hasServerResponse = nameResponded || openPorts.Count > 0;
+        var isOnline = openPorts.Count > 0;
 
         return new NetworkDevice
         {
             IpAddress = ipText,
-            HostName = string.IsNullOrWhiteSpace(hostName) ? "Неизвестное устройство" : hostName,
+            HostName = string.IsNullOrWhiteSpace(hostName) ? NetworkDevice.UnknownHostName : hostName,
             MacAddress = arpCache.TryGetValue(ipText, out var macAddress) ? macAddress : "",
-            IsOnline = !isServer || hasServerResponse,
+            IsOnline = isOnline,
             IsServer = isServer,
             NameResponded = nameResponded,
             CheckedAt = DateTime.Now,
-            Source = isServer && !hasServerResponse ? $"{source} (нет ответа имени/портов)" : source,
+            Source = isOnline ? source : $"{source} (нет открытых портов)",
             OpenPorts = openPorts.Count == 0 ? "" : string.Join(", ", openPorts)
         };
-    }
-
-    private static async Task<NetworkDevice> CheckServerIpAsync(
-        IPAddress address,
-        string source,
-        IReadOnlyDictionary<string, string> arpCache,
-        CancellationToken cancellationToken)
-    {
-        if (!await PingAsync(address, cancellationToken))
-        {
-            var offlineDevice = NetworkDevice.Offline(address, source);
-            offlineDevice.IsServer = true;
-            return offlineDevice;
-        }
-
-        var device = await BuildOnlineDeviceAsync(address, source, arpCache, cancellationToken);
-        device.IsServer = true;
-        if (!HasServerResponse(device))
-        {
-            device.IsOnline = false;
-            device.Source = $"{source} (нет ответа имени/портов)";
-        }
-
-        return device;
-    }
-
-    private static bool HasServerResponse(NetworkDevice device)
-    {
-        return device.NameResponded || !string.IsNullOrWhiteSpace(device.OpenPorts);
     }
 
     private static async Task<string> ResolveHostNameAsync(IPAddress address, CancellationToken cancellationToken)
@@ -261,7 +224,7 @@ internal sealed partial class NetworkScanner
         }
         catch
         {
-            return "Неизвестное устройство";
+            return NetworkDevice.UnknownHostName;
         }
     }
 
@@ -269,7 +232,7 @@ internal sealed partial class NetworkScanner
     {
         if (string.IsNullOrWhiteSpace(hostName))
         {
-            return "Неизвестное устройство";
+            return NetworkDevice.UnknownHostName;
         }
 
         var firstDot = hostName.IndexOf('.');
@@ -467,6 +430,11 @@ internal sealed partial class NetworkScanner
 
     private static bool LooksLikeServer(string hostName, IReadOnlyCollection<int> openPorts)
     {
+        if (openPorts.Count > 0)
+        {
+            return true;
+        }
+
         var normalizedName = hostName.ToLowerInvariant();
         if (ServerNameTokens.Any(token => normalizedName.Contains(token, StringComparison.OrdinalIgnoreCase)))
         {
