@@ -5,23 +5,48 @@ namespace NetworkMonitor;
 public partial class Form1 : Form
 {
     private const int MaxEventLogItems = 500;
+    private static readonly char[] ServiceAddressSeparators = [';', ',', '\r', '\n', '\t'];
 
     private readonly NetworkScanner _scanner = new();
+    private readonly ServiceChecker _serviceChecker = new();
     private readonly ManualIpStore _manualIpStore = new();
     private readonly ManualIpStore _serverIpStore = new("server_ips.json");
+    private readonly ServiceEndpointStore _serviceEndpointStore = new();
     private readonly Dictionary<string, NetworkDevice> _devices = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _manualIpAddresses;
     private readonly List<string> _serverIpAddresses;
+    private readonly List<ServiceEndpoint> _services;
     private CancellationTokenSource? _scanCancellation;
+    private CancellationTokenSource? _serviceCancellation;
     private bool _scanInProgress;
+    private bool _serviceCheckInProgress;
     private Font? _serverRowFont;
+    private TabControl mainTabs = null!;
+    private DataGridView servicesGrid = null!;
+    private TextBox serviceSearchTextBox = null!;
+    private Button checkServiceSearchButton = null!;
+    private Button checkServicesButton = null!;
+    private ContextMenuStrip deviceContextMenu = null!;
+    private ContextMenuStrip serviceContextMenu = null!;
+    private ContextMenuStrip eventLogContextMenu = null!;
+    private ToolStripMenuItem copyDeviceCellMenuItem = null!;
+    private ToolStripMenuItem copyServiceCellMenuItem = null!;
+    private ToolStripMenuItem copyEventLogMenuItem = null!;
+    private ToolStripMenuItem editServiceMenuItem = null!;
+    private ToolStripMenuItem deleteServiceMenuItem = null!;
+    private ToolStripMenuItem scanServiceMenuItem = null!;
 
     public Form1()
     {
         _manualIpAddresses = _manualIpStore.Load();
         _serverIpAddresses = _serverIpStore.Load();
+        _services = _serviceEndpointStore.Load();
         InitializeComponent();
+        BuildTabbedLayout();
         ConfigureGrid();
+        ConfigureServicesGrid();
+        ConfigureEventLogCopy();
+        RenderServices();
 
         autoScanTimer.Interval = 10 * 60 * 1000;
         autoScanTimer.Tick += async (_, _) => await RunServerScanAsync("Автоматическая проверка серверов");
@@ -32,12 +57,21 @@ public partial class Form1 : Form
             AddEventLog("Приложение запущено. Автоматически проверяются только известные серверы.");
             await RunServerScanAsync("Первичная проверка серверов");
         };
-        FormClosing += (_, _) => _scanCancellation?.Cancel();
+        FormClosing += (_, _) =>
+        {
+            _scanCancellation?.Cancel();
+            _serviceCancellation?.Cancel();
+        };
     }
 
     private void ConfigureGrid()
     {
         _serverRowFont = new Font(devicesGrid.Font, FontStyle.Bold);
+        deviceContextMenu = BuildDeviceContextMenu();
+        devicesGrid.ContextMenuStrip = deviceContextMenu;
+        devicesGrid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
+        devicesGrid.KeyDown += dataGridView_KeyDown;
+        devicesGrid.MouseDown += devicesGrid_MouseDown;
 
         devicesGrid.Columns.Clear();
         devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Type", HeaderText = "Тип", Width = 105 });
@@ -48,6 +82,526 @@ public partial class Form1 : Form
         devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "Статус", Width = 115 });
         devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "CheckedAt", HeaderText = "Проверено", Width = 105 });
         devicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Source", HeaderText = "Источник", Width = 135 });
+    }
+
+    private ContextMenuStrip BuildDeviceContextMenu()
+    {
+        var contextMenu = new ContextMenuStrip();
+        copyDeviceCellMenuItem = new ToolStripMenuItem("Копировать");
+        copyDeviceCellMenuItem.Click += (_, _) => CopyCurrentGridCell(devicesGrid);
+        contextMenu.Items.Add(copyDeviceCellMenuItem);
+        contextMenu.Opening += (_, e) => e.Cancel = devicesGrid.CurrentCell is null;
+        return contextMenu;
+    }
+
+    private void ConfigureEventLogCopy()
+    {
+        eventLogContextMenu = new ContextMenuStrip();
+        copyEventLogMenuItem = new ToolStripMenuItem("Копировать");
+        copyEventLogMenuItem.Click += (_, _) => CopySelectedEventLogText();
+        eventLogContextMenu.Items.Add(copyEventLogMenuItem);
+        eventLogContextMenu.Opening += (_, e) => e.Cancel = eventLogListBox.SelectedItem is null;
+
+        eventLogListBox.ContextMenuStrip = eventLogContextMenu;
+        eventLogListBox.KeyDown += eventLogListBox_KeyDown;
+        eventLogListBox.MouseDown += eventLogListBox_MouseDown;
+    }
+
+    private void BuildTabbedLayout()
+    {
+        rootLayout.SuspendLayout();
+
+        rootLayout.Controls.Remove(actionPanel);
+        rootLayout.Controls.Remove(devicesGrid);
+        rootLayout.Controls.Remove(eventLogGroupBox);
+        rootLayout.Controls.Remove(footerLayout);
+
+        rootLayout.RowStyles.Clear();
+        rootLayout.RowCount = 4;
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 150F));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        mainTabs = new TabControl
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 0, 0)
+        };
+
+        var networkTab = new TabPage("Сеть");
+        var networkLayout = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(0)
+        };
+        networkLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        networkLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        networkLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        networkLayout.Controls.Add(actionPanel, 0, 0);
+        networkLayout.Controls.Add(devicesGrid, 0, 1);
+        networkTab.Controls.Add(networkLayout);
+
+        var servicesTab = new TabPage("Сервисы");
+        servicesTab.Controls.Add(BuildServicesLayout());
+
+        mainTabs.TabPages.Add(networkTab);
+        mainTabs.TabPages.Add(servicesTab);
+
+        rootLayout.Controls.Add(mainTabs, 0, 1);
+        rootLayout.Controls.Add(eventLogGroupBox, 0, 2);
+        rootLayout.Controls.Add(footerLayout, 0, 3);
+
+        rootLayout.ResumeLayout(true);
+    }
+
+    private Control BuildServicesLayout()
+    {
+        var servicesLayout = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(0)
+        };
+        servicesLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        servicesLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        servicesLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        servicesLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+        var serviceSearchPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 8, 0, 4),
+            WrapContents = true
+        };
+
+        var serviceAddressLabel = new Label
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 7, 8, 0),
+            Text = "DNS-имя или IP:"
+        };
+
+        serviceSearchTextBox = new TextBox
+        {
+            Margin = new Padding(0, 3, 8, 3),
+            PlaceholderText = "server.domain.local или 192.168.1.10",
+            Size = new Size(360, 27)
+        };
+        serviceSearchTextBox.KeyDown += serviceSearchTextBox_KeyDown;
+
+        checkServiceSearchButton = new Button
+        {
+            AutoSize = true,
+            Text = "Проверить",
+            UseVisualStyleBackColor = true,
+            Margin = new Padding(0, 2, 8, 2)
+        };
+        checkServiceSearchButton.Click += checkServiceSearchButton_Click;
+
+        serviceSearchPanel.Controls.Add(serviceAddressLabel);
+        serviceSearchPanel.Controls.Add(serviceSearchTextBox);
+        serviceSearchPanel.Controls.Add(checkServiceSearchButton);
+
+        var servicesActionPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 0, 8),
+            WrapContents = true
+        };
+
+        checkServicesButton = new Button
+        {
+            AutoSize = true,
+            Text = "Проверить сервисы",
+            UseVisualStyleBackColor = true,
+            Margin = new Padding(0, 2, 8, 2)
+        };
+        checkServicesButton.Click += checkServicesButton_Click;
+
+        servicesActionPanel.Controls.Add(checkServicesButton);
+
+        serviceContextMenu = BuildServiceContextMenu();
+        servicesGrid = new DataGridView
+        {
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AllowUserToResizeRows = false,
+            BackgroundColor = SystemColors.Window,
+            BorderStyle = BorderStyle.Fixed3D,
+            ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText,
+            ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize,
+            ContextMenuStrip = serviceContextMenu,
+            Dock = DockStyle.Fill,
+            EditMode = DataGridViewEditMode.EditProgrammatically,
+            Margin = new Padding(0),
+            MultiSelect = false,
+            ReadOnly = true,
+            RowHeadersWidth = 48,
+            RowTemplate = { Height = 30 },
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect
+        };
+        servicesGrid.CellDoubleClick += servicesGrid_CellDoubleClick;
+        servicesGrid.KeyDown += dataGridView_KeyDown;
+        servicesGrid.MouseDown += servicesGrid_MouseDown;
+
+        servicesLayout.Controls.Add(serviceSearchPanel, 0, 0);
+        servicesLayout.Controls.Add(servicesActionPanel, 0, 1);
+        servicesLayout.Controls.Add(servicesGrid, 0, 2);
+        return servicesLayout;
+    }
+
+    private ContextMenuStrip BuildServiceContextMenu()
+    {
+        var contextMenu = new ContextMenuStrip();
+        copyServiceCellMenuItem = new ToolStripMenuItem("Копировать");
+        editServiceMenuItem = new ToolStripMenuItem("Редактировать");
+        deleteServiceMenuItem = new ToolStripMenuItem("Удалить");
+        scanServiceMenuItem = new ToolStripMenuItem("Сканировать");
+
+        copyServiceCellMenuItem.Click += (_, _) => CopyCurrentGridCell(servicesGrid);
+        editServiceMenuItem.Click += editServiceMenuItem_Click;
+        deleteServiceMenuItem.Click += deleteServiceMenuItem_Click;
+        scanServiceMenuItem.Click += scanServiceMenuItem_Click;
+
+        contextMenu.Items.AddRange([
+            copyServiceCellMenuItem,
+            new ToolStripSeparator(),
+            editServiceMenuItem,
+            deleteServiceMenuItem,
+            new ToolStripSeparator(),
+            scanServiceMenuItem
+        ]);
+
+        contextMenu.Opening += (_, e) => e.Cancel = GetSelectedService() is null;
+        return contextMenu;
+    }
+
+    private void ConfigureServicesGrid()
+    {
+        servicesGrid.Columns.Clear();
+        servicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "Сервис", Width = 135, ReadOnly = true });
+        servicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Address", HeaderText = "DNS-имя или IP", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 280 });
+        servicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Ip", HeaderText = "IPv4", Width = 135, ReadOnly = true });
+        servicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "Статус", Width = 115, ReadOnly = true });
+        servicesGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "CheckedAt", HeaderText = "Проверено", Width = 105, ReadOnly = true });
+    }
+
+    private void RenderServices()
+    {
+        servicesGrid.SuspendLayout();
+        servicesGrid.Rows.Clear();
+
+        foreach (var service in _services)
+        {
+            var rowIndex = servicesGrid.Rows.Add(
+                service.Name,
+                service.Address,
+                service.ResolvedIp,
+                service.CheckedAt is null ? "Не проверено" : service.StatusText,
+                service.CheckedAtText);
+
+            var row = servicesGrid.Rows[rowIndex];
+            row.Tag = service;
+
+            if (service.CheckedAt is not null)
+            {
+                row.Cells["Status"].Style.ForeColor = service.IsOnline ? Color.ForestGreen : Color.Firebrick;
+            }
+        }
+
+        servicesGrid.ResumeLayout();
+    }
+
+    private void SaveServices()
+    {
+        _serviceEndpointStore.Save(_services);
+    }
+
+    private async Task RunServiceChecksAsync(IEnumerable<ServiceEndpoint> servicesToCheck)
+    {
+        if (_serviceCheckInProgress)
+        {
+            return;
+        }
+
+        var selectedServices = servicesToCheck.ToList();
+        if (selectedServices.Count == 0)
+        {
+            return;
+        }
+
+        _serviceCheckInProgress = true;
+        _serviceCancellation?.Cancel();
+        _serviceCancellation = new CancellationTokenSource();
+        SetServiceCheckState(false);
+        AddEventLog($"Проверка сервисов: {selectedServices.Count}.");
+
+        try
+        {
+            var progress = new Progress<ScanProgress>(UpdateProgress);
+            var results = await _serviceChecker.CheckAsync(selectedServices, progress, _serviceCancellation.Token);
+
+            foreach (var result in results)
+            {
+                var service = _services.First(item => item.Name.Equals(result.Name, StringComparison.OrdinalIgnoreCase));
+                service.Address = result.Address;
+                service.ResolvedIp = result.ResolvedIp;
+                service.IsOnline = result.IsOnline;
+                service.CheckedAt = result.CheckedAt;
+                service.Details = result.Details;
+            }
+
+            RenderServices();
+
+            var onlineCount = results.Count(service => service.IsOnline);
+            var offlineCount = results.Count - onlineCount;
+            statusLabel.Text = $"Проверка сервисов завершена. В сети: {onlineCount}, недоступно: {offlineCount}";
+            AddEventLog($"Проверка сервисов завершена: в сети {onlineCount}, недоступно {offlineCount}.");
+        }
+        catch (OperationCanceledException)
+        {
+            statusLabel.Text = "Проверка сервисов остановлена.";
+            AddEventLog("Проверка сервисов остановлена.");
+        }
+        catch (Exception ex)
+        {
+            statusLabel.Text = "Ошибка проверки сервисов.";
+            AddEventLog($"Ошибка проверки сервисов: {ex.Message}");
+            MessageBox.Show($"Ошибка проверки сервисов: {ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetServiceCheckState(true);
+            _serviceCheckInProgress = false;
+        }
+    }
+
+    private void SetServiceCheckState(bool enabled)
+    {
+        checkServicesButton.Enabled = enabled;
+        checkServiceSearchButton.Enabled = enabled;
+        serviceSearchTextBox.Enabled = enabled;
+        copyServiceCellMenuItem.Enabled = enabled;
+        editServiceMenuItem.Enabled = enabled;
+        deleteServiceMenuItem.Enabled = enabled;
+        scanServiceMenuItem.Enabled = enabled;
+    }
+
+    private ServiceEndpoint? GetSelectedService()
+    {
+        return servicesGrid.CurrentRow?.Tag as ServiceEndpoint;
+    }
+
+    private void SelectServiceRow(ServiceEndpoint service)
+    {
+        foreach (DataGridViewRow row in servicesGrid.Rows)
+        {
+            if (!ReferenceEquals(row.Tag, service))
+            {
+                continue;
+            }
+
+            servicesGrid.ClearSelection();
+            row.Selected = true;
+            servicesGrid.CurrentCell = row.Cells[0];
+            return;
+        }
+    }
+
+    private bool HasServiceName(string name, ServiceEndpoint? excludedService = null)
+    {
+        return _services.Any(service =>
+            !ReferenceEquals(service, excludedService)
+            && service.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private ServiceEndpoint? FindServiceByAddressOrIp(string value)
+    {
+        return _services.FirstOrDefault(service =>
+            service.Address.Equals(value, StringComparison.OrdinalIgnoreCase)
+            || ServiceAddressContains(service.Address, value)
+            || service.ResolvedIp.Equals(value, StringComparison.OrdinalIgnoreCase)
+            || service.Name.Equals(value, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool ServiceAddressContains(string address, string value)
+    {
+        return address
+            .Split(ServiceAddressSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(candidate => candidate.Equals(value, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task CheckServiceSearchAsync()
+    {
+        var address = serviceSearchTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(address))
+        {
+            MessageBox.Show("Введите DNS-имя или IP.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            serviceSearchTextBox.Focus();
+            return;
+        }
+
+        var service = FindServiceByAddressOrIp(address);
+        if (service is null)
+        {
+            service = new ServiceEndpoint
+            {
+                Name = address,
+                Address = address
+            };
+
+            _services.Add(service);
+            SaveServices();
+            RenderServices();
+            AddEventLog($"Адрес добавлен для проверки сервисов: {service.Address}.");
+        }
+        else if (string.IsNullOrWhiteSpace(service.Address))
+        {
+            service.Address = address;
+            SaveServices();
+        }
+
+        SelectServiceRow(service);
+        await RunServiceChecksAsync([service]);
+        SelectServiceRow(service);
+
+        serviceSearchTextBox.SelectAll();
+        serviceSearchTextBox.Focus();
+    }
+
+    private bool EditService(ServiceEndpoint service)
+    {
+        using var dialog = new Form
+        {
+            AutoScaleMode = AutoScaleMode.Font,
+            ClientSize = new Size(520, 170),
+            Font = Font,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.CenterParent,
+            Text = "Редактировать сервис"
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12)
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var nameLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 6, 8, 6),
+            Text = "Название:"
+        };
+        var nameBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 3, 0, 3),
+            Text = service.Name
+        };
+
+        var addressLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 6, 8, 6),
+            Text = "DNS-имя или IP:"
+        };
+        var addressBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 3, 0, 3),
+            Text = service.Address
+        };
+
+        var buttonsPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            Margin = new Padding(0, 12, 0, 0)
+        };
+
+        var saveButton = new Button
+        {
+            AutoSize = true,
+            Text = "Сохранить",
+            UseVisualStyleBackColor = true
+        };
+        var cancelButton = new Button
+        {
+            AutoSize = true,
+            DialogResult = DialogResult.Cancel,
+            Text = "Отмена",
+            UseVisualStyleBackColor = true
+        };
+
+        saveButton.Click += (_, _) =>
+        {
+            var updatedName = nameBox.Text.Trim();
+            var updatedAddress = addressBox.Text.Trim();
+
+            if (string.IsNullOrWhiteSpace(updatedName))
+            {
+                MessageBox.Show("Введите название сервиса.", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                nameBox.Focus();
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(updatedAddress))
+            {
+                MessageBox.Show("Введите DNS-имя или IP сервиса.", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                addressBox.Focus();
+                return;
+            }
+
+            if (HasServiceName(updatedName, service))
+            {
+                MessageBox.Show("Сервис с таким названием уже есть в списке.", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                nameBox.Focus();
+                return;
+            }
+
+            service.Name = updatedName;
+            service.Address = updatedAddress;
+            service.ResolvedIp = "";
+            service.CheckedAt = null;
+            service.IsOnline = false;
+            service.Details = "Не проверено";
+            dialog.DialogResult = DialogResult.OK;
+            dialog.Close();
+        };
+
+        buttonsPanel.Controls.Add(saveButton);
+        buttonsPanel.Controls.Add(cancelButton);
+
+        layout.Controls.Add(nameLabel, 0, 0);
+        layout.Controls.Add(nameBox, 1, 0);
+        layout.Controls.Add(addressLabel, 0, 1);
+        layout.Controls.Add(addressBox, 1, 1);
+        layout.Controls.Add(buttonsPanel, 0, 3);
+        layout.SetColumnSpan(buttonsPanel, 2);
+
+        dialog.AcceptButton = saveButton;
+        dialog.CancelButton = cancelButton;
+        dialog.Controls.Add(layout);
+
+        return dialog.ShowDialog(this) == DialogResult.OK;
     }
 
     private List<string> GetServerIpAddresses()
@@ -402,6 +956,61 @@ public partial class Form1 : Form
         }
     }
 
+    private static void SelectGridCellAtMouse(DataGridView grid, MouseEventArgs e)
+    {
+        var hit = grid.HitTest(e.X, e.Y);
+        if (hit.RowIndex < 0)
+        {
+            grid.ClearSelection();
+            grid.CurrentCell = null;
+            return;
+        }
+
+        grid.ClearSelection();
+        grid.Rows[hit.RowIndex].Selected = true;
+        var columnIndex = hit.ColumnIndex >= 0 ? hit.ColumnIndex : 0;
+        grid.CurrentCell = grid.Rows[hit.RowIndex].Cells[columnIndex];
+    }
+
+    private static void CopyCurrentGridCell(DataGridView grid)
+    {
+        var text = Convert.ToString(grid.CurrentCell?.Value);
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        Clipboard.SetText(text);
+    }
+
+    private static void CopyGridSelection(DataGridView grid)
+    {
+        var dataObject = grid.GetClipboardContent();
+        var text = dataObject?.GetText();
+
+        if (string.IsNullOrEmpty(text))
+        {
+            text = Convert.ToString(grid.CurrentCell?.Value);
+        }
+
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        Clipboard.SetText(text);
+    }
+
+    private void CopySelectedEventLogText()
+    {
+        if (eventLogListBox.SelectedItem is null)
+        {
+            return;
+        }
+
+        Clipboard.SetText(eventLogListBox.SelectedItem.ToString() ?? "");
+    }
+
     private async void addIpButton_Click(object sender, EventArgs e)
     {
         if (!ManualIpStore.TryNormalize(ipTextBox.Text, out var normalized))
@@ -456,6 +1065,153 @@ public partial class Form1 : Form
             device.IpAddress,
             _manualIpAddresses.Contains(device.IpAddress, StringComparer.OrdinalIgnoreCase) ? "Вручную" : "Ручная проверка",
             device.IsServer);
+    }
+
+    private void devicesGrid_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Right)
+        {
+            SelectGridCellAtMouse(devicesGrid, e);
+        }
+    }
+
+    private void dataGridView_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (sender is not DataGridView grid || !e.Control || e.KeyCode != Keys.C)
+        {
+            return;
+        }
+
+        CopyGridSelection(grid);
+        e.Handled = true;
+    }
+
+    private async void checkServicesButton_Click(object? sender, EventArgs e)
+    {
+        await RunServiceChecksAsync(_services);
+    }
+
+    private async void checkServiceSearchButton_Click(object? sender, EventArgs e)
+    {
+        await CheckServiceSearchAsync();
+    }
+
+    private async void serviceSearchTextBox_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.Enter)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+        await CheckServiceSearchAsync();
+    }
+
+    private void servicesGrid_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right)
+        {
+            return;
+        }
+
+        SelectGridCellAtMouse(servicesGrid, e);
+    }
+
+    private void editServiceMenuItem_Click(object? sender, EventArgs e)
+    {
+        var service = GetSelectedService();
+        if (service is null)
+        {
+            return;
+        }
+
+        var oldName = service.Name;
+        if (!EditService(service))
+        {
+            return;
+        }
+
+        SaveServices();
+        RenderServices();
+        AddEventLog($"Сервис изменен: {oldName} -> {service.Name} ({service.Address}).");
+        statusLabel.Text = $"Сервис изменен: {service.Name}.";
+    }
+
+    private void deleteServiceMenuItem_Click(object? sender, EventArgs e)
+    {
+        var service = GetSelectedService();
+        if (service is null)
+        {
+            return;
+        }
+
+        var result = MessageBox.Show(
+            $"Удалить сервис \"{service.Name}\"?",
+            Text,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        _services.Remove(service);
+        SaveServices();
+        RenderServices();
+        AddEventLog($"Сервис удален: {service.Name}.");
+        statusLabel.Text = $"Сервис удален: {service.Name}.";
+    }
+
+    private async void scanServiceMenuItem_Click(object? sender, EventArgs e)
+    {
+        var service = GetSelectedService();
+        if (service is null)
+        {
+            return;
+        }
+
+        await RunServiceChecksAsync([service]);
+    }
+
+    private async void servicesGrid_CellDoubleClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0 || servicesGrid.Rows[e.RowIndex].Tag is not ServiceEndpoint service)
+        {
+            return;
+        }
+
+        await RunServiceChecksAsync([service]);
+    }
+
+    private void eventLogListBox_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right)
+        {
+            return;
+        }
+
+        var index = eventLogListBox.IndexFromPoint(e.Location);
+        if (index == ListBox.NoMatches)
+        {
+            eventLogListBox.ClearSelected();
+            return;
+        }
+
+        eventLogListBox.SelectedIndex = index;
+    }
+
+    private void eventLogListBox_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!e.Control || e.KeyCode != Keys.C)
+        {
+            return;
+        }
+
+        CopySelectedEventLogText();
+        e.Handled = true;
     }
 
 }

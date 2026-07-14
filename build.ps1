@@ -18,22 +18,37 @@ $targets = @(
 
 foreach ($target in $targets) {
     $runtime = $target.Runtime
-    $publishDir = Join-Path $root "dist\$runtime"
+    $publishDir = Join-Path $root "dist\$runtime-$PID"
 
-    dotnet publish $project `
-        --configuration $Configuration `
-        --runtime $runtime `
-        --self-contained true `
-        -p:PublishSingleFile=true `
-        -p:EnableCompressionInSingleFile=true `
-        -p:DebugType=None `
-        -p:DebugSymbols=false `
-        -p:PublishReadyToRun=false `
-        --output $publishDir
+    try {
+        if (Test-Path $publishDir) {
+            Remove-Item -LiteralPath $publishDir -Recurse -Force
+        }
 
-    Copy-Item -Force `
-        -Path (Join-Path $publishDir "NetworkMonitor.exe") `
-        -Destination (Join-Path $artifacts $target.SetupName)
+        dotnet publish $project `
+            --configuration $Configuration `
+            --runtime $runtime `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:DebugType=None `
+            -p:DebugSymbols=false `
+            -p:PublishReadyToRun=false `
+            --output $publishDir
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "dotnet publish failed for $runtime with exit code $LASTEXITCODE."
+        }
+
+        Copy-Item -Force `
+            -Path (Join-Path $publishDir "NetworkMonitor.exe") `
+            -Destination (Join-Path $artifacts $target.SetupName)
+    }
+    finally {
+        if (Test-Path $publishDir) {
+            Remove-Item -LiteralPath $publishDir -Recurse -Force
+        }
+    }
 }
 
 Write-Host "Done. Setup executables are in the artifacts folder."

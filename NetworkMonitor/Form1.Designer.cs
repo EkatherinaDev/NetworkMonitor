@@ -28,6 +28,8 @@ partial class Form1
         {
             _scanCancellation?.Cancel();
             _scanCancellation?.Dispose();
+            _serviceCancellation?.Cancel();
+            _serviceCancellation?.Dispose();
             _serverRowFont?.Dispose();
             components.Dispose();
         }

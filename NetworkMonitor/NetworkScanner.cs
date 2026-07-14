@@ -152,11 +152,11 @@ internal sealed partial class NetworkScanner
 
         var arpCache = await ReadArpCacheAsync(cancellationToken);
         var device = await BuildOnlineDeviceAsync(address, source, arpCache, cancellationToken);
-        if (requireServerNameResponse && !device.NameResponded)
+        if (requireServerNameResponse && !HasServerResponse(device))
         {
             device.IsOnline = false;
             device.IsServer = true;
-            device.Source = $"{source} (нет ответа имени)";
+            device.Source = $"{source} (нет ответа имени/портов)";
         }
 
         return device;
@@ -205,17 +205,18 @@ internal sealed partial class NetworkScanner
         var isServer = LooksLikeServer(hostName, openPorts);
         var ipText = address.ToString();
         var nameResponded = !string.IsNullOrWhiteSpace(directHostName);
+        var hasServerResponse = nameResponded || openPorts.Count > 0;
 
         return new NetworkDevice
         {
             IpAddress = ipText,
             HostName = string.IsNullOrWhiteSpace(hostName) ? "Неизвестное устройство" : hostName,
             MacAddress = arpCache.TryGetValue(ipText, out var macAddress) ? macAddress : "",
-            IsOnline = !isServer || nameResponded,
+            IsOnline = !isServer || hasServerResponse,
             IsServer = isServer,
             NameResponded = nameResponded,
             CheckedAt = DateTime.Now,
-            Source = isServer && !nameResponded ? $"{source} (нет ответа имени)" : source,
+            Source = isServer && !hasServerResponse ? $"{source} (нет ответа имени/портов)" : source,
             OpenPorts = openPorts.Count == 0 ? "" : string.Join(", ", openPorts)
         };
     }
@@ -235,13 +236,18 @@ internal sealed partial class NetworkScanner
 
         var device = await BuildOnlineDeviceAsync(address, source, arpCache, cancellationToken);
         device.IsServer = true;
-        if (!device.NameResponded)
+        if (!HasServerResponse(device))
         {
             device.IsOnline = false;
-            device.Source = $"{source} (нет ответа имени)";
+            device.Source = $"{source} (нет ответа имени/портов)";
         }
 
         return device;
+    }
+
+    private static bool HasServerResponse(NetworkDevice device)
+    {
+        return device.NameResponded || !string.IsNullOrWhiteSpace(device.OpenPorts);
     }
 
     private static async Task<string> ResolveHostNameAsync(IPAddress address, CancellationToken cancellationToken)

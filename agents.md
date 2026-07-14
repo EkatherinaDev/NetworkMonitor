@@ -19,6 +19,10 @@
 - `NetworkMonitor/Form1.cs` - логика формы, обработчики кнопок, запуск сканирования, обновление таблицы.
 - `NetworkMonitor/Form1.Designer.cs` - WinForms-разметка интерфейса.
 - `NetworkMonitor/NetworkScanner.cs` - ICMP ping, поиск адресов локальной сети, reverse DNS, ARP, TCP-проверка портов, определение серверов.
+- `NetworkMonitor/ServiceChecker.cs` - проверка сервисов через DNS IPv4 resolution и ping.
+- `NetworkMonitor/ServiceEndpoint.cs` - модель строки вкладки `Сервисы`.
+- `NetworkMonitor/ServiceEndpointStore.cs` - загрузка и сохранение адресов сервисов.
+- `NetworkMonitor/default_services.json` - дефолтный список сервисов, встраивается как ресурс и копируется в профиль пользователя.
 - `NetworkMonitor/ManualIpStore.cs` - загрузка и сохранение ручных IP.
 - `NetworkMonitor/NetworkDevice.cs` - модель строки таблицы.
 - `NetworkMonitor/NetworkScanResult.cs` - результат сканирования и прогресс.
@@ -32,7 +36,7 @@ Ping не выполняется через `cmd`, `ping.exe`, batch-файлы 
 
 `arp.exe -a` запускается только для чтения ARP-кэша и показа MAC-адресов. Не используйте ARP как критерий доступности устройства.
 
-`nmblookup` не должен быть внешней зависимостью приложения. Для проверки имени сервера используется встроенный NetBIOS Node Status request по UDP/137, реализованный в `NetworkScanner`. Для серверов `ping` недостаточен: статус online ставится только при ответе имени.
+`nmblookup` не должен быть внешней зависимостью приложения. Для проверки имени сервера используется встроенный NetBIOS Node Status request по UDP/137, реализованный в `NetworkScanner`. Для серверов `ping` недостаточен: статус online ставится только при ответе имени или наличии открытого проверяемого TCP-порта.
 
 Проверка серверных портов выполняется через `TcpClient`. Список портов и токены имен находятся в `NetworkScanner`.
 
@@ -41,6 +45,12 @@ Ping не выполняется через `cmd`, `ping.exe`, batch-файлы 
 Сканирование должно оставаться асинхронным. Не блокируйте UI-поток ожиданием ping, DNS, ARP или TCP-портов.
 
 Журнал событий мониторинга находится в `Form1` и отображается через `eventLogListBox`. В журнал нужно писать запуск и завершение проверок, ошибки, найденные серверы и изменения статуса.
+
+Вкладка `Сервисы` создается в `Form1.BuildTabbedLayout()`. Не ищите DNS-имя или IP сервиса обходом подсети: сервисный адрес должен быть введен пользователем или загружен из `%AppData%\NetworkMonitor\service_endpoints.json`. Автоматически определяется только IPv4 для уже заданного DNS-имени через `Dns.GetHostAddressesAsync`, затем адрес проверяется параллельно через `ServiceChecker`. Не запускайте `ping -4` через cmd; это только пользовательский аналог того, что делает код. Одна строка сервиса может содержать несколько DNS-имен или IP через `;`; `ServiceChecker` должен проверить кандидаты по очереди и вывести первый IPv4, который ответил на ping.
+
+Таблица сервисов должна быть read-only. Не возвращайте редактирование ячеек простым кликом. Верхняя строка вкладки `Сервисы` - это быстрая проверка по одному полю `DNS-имя или IP` и кнопке `Проверить`. Кнопка ищет существующую строку по названию, DNS/IP или найденному IPv4; если строки нет, создает новый `ServiceEndpoint`, где `Name` и `Address` равны введенному значению, сохраняет список и сразу запускает проверку. Редактирование, удаление, сканирование и копирование строки выполняются через контекстное меню правой кнопкой мыши. Отдельная кнопка `Сохранить адреса` не нужна: `ServiceEndpointStore.Save` вызывается после добавления, редактирования и удаления.
+
+В таблицах `devicesGrid` и `servicesGrid`, а также в `eventLogListBox` должно работать копирование текста. Ctrl+C копирует выбранную строку или запись журнала. Правый клик по ячейке таблицы должен давать пункт `Копировать` для значения текущей ячейки.
 
 ### Хранение данных
 
@@ -67,6 +77,28 @@ Ping не выполняется через `cmd`, `ping.exe`, batch-файлы 
 ```
 
 Формат такой же: JSON-массив строк. Файл обслуживается тем же `ManualIpStore`, но с другим именем файла.
+
+Дефолтный список сервисов хранится здесь:
+
+```text
+%AppData%\NetworkMonitor\default_services.json
+```
+
+Источник дефолтов в репозитории:
+
+```text
+NetworkMonitor/default_services.json
+```
+
+Файл в репозитории встраивается в EXE как ресурс `NetworkMonitor.default_services.json`, потому установщик может оставаться одним EXE. `ServiceEndpointStore` при первом запуске создает файл дефолтов в профиле пользователя из файла рядом с приложением или из embedded resource. Не переносите дефолтные сервисы обратно в C#-массив.
+
+Текущий рабочий список сервисов Covid19, Промед, DIGIPAX, RIS App, ARM EDN и Telemed хранится здесь:
+
+```text
+%AppData%\NetworkMonitor\service_endpoints.json
+```
+
+Файл обслуживается `ServiceEndpointStore`. Если файла еще нет, он создается из `default_services.json`. Текущие дефолты: `Covid19` - `covid19.vologdamed.local;10.35.0.66`, `Промед` - `rmisvo.cifromed35.ru`, `DIGIPAX` - `10.0.5.67`, `RIS App` - `172.24.3.11`, `ARM EDN` - `edn.vologdamed.local`, `Telemed` - `10.35.0.99`. Если рабочий файл уже есть, загрузка должна использовать сохраненный список, добавить недостающие дефолтные строки и заполнить пустые адреса стандартных сервисов из файла дефолтов.
 
 ### Установка
 
@@ -100,6 +132,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 - Не добавляйте зависимость от внешних сетевых утилит для ping.
 - Не добавляйте зависимость от внешней утилиты `nmblookup`; NetBIOS-опрос имени сервера должен оставаться встроенным в код.
+- Не добавляйте запуск `ping -4` через cmd для сервисов; используйте DNS IPv4 resolution в `ServiceChecker`.
 - Не запускайте долгие операции в UI-потоке.
 - Не возвращайте автоматическое сканирование всей сети по таймеру; таймер должен проверять только серверы.
 - Не меняйте формат `manual_ips.json` без обновления `ManualIpStore` и документации.
@@ -126,6 +159,10 @@ This file documents the project internals for developers and future coding agent
 - `NetworkMonitor/Form1.cs` - form logic, button handlers, scan orchestration, table rendering.
 - `NetworkMonitor/Form1.Designer.cs` - WinForms UI layout.
 - `NetworkMonitor/NetworkScanner.cs` - ICMP ping, local target discovery, reverse DNS, ARP, TCP port checks, server detection.
+- `NetworkMonitor/ServiceChecker.cs` - service checks through DNS IPv4 resolution and ping.
+- `NetworkMonitor/ServiceEndpoint.cs` - row model for the `Сервисы` tab.
+- `NetworkMonitor/ServiceEndpointStore.cs` - service address loading and saving.
+- `NetworkMonitor/default_services.json` - default service list, embedded as a resource and copied to the user profile.
 - `NetworkMonitor/ManualIpStore.cs` - manual IP loading and saving.
 - `NetworkMonitor/NetworkDevice.cs` - table row model.
 - `NetworkMonitor/NetworkScanResult.cs` - scan result and progress records.
@@ -139,7 +176,7 @@ Ping is not performed through `cmd`, `ping.exe`, batch files, or PowerShell. The
 
 `arp.exe -a` is launched only to read the Windows ARP cache and display MAC addresses. Do not use ARP as the source of truth for device availability.
 
-`nmblookup` must not be an external application dependency. Server name verification uses the built-in NetBIOS Node Status request over UDP/137 implemented in `NetworkScanner`. For servers, ping is not enough: online status requires a name response.
+`nmblookup` must not be an external application dependency. Server name verification uses the built-in NetBIOS Node Status request over UDP/137 implemented in `NetworkScanner`. For servers, ping is not enough: online status requires a name response or a checked open TCP port.
 
 Server port checks are performed through `TcpClient`. The port list and hostname tokens are defined in `NetworkScanner`.
 
@@ -148,6 +185,12 @@ Automatic checking is started by a WinForms timer in `Form1`: the interval is 10
 Scanning must remain asynchronous. Do not block the UI thread while waiting for ping, DNS, ARP, or TCP port checks.
 
 The monitoring event log is owned by `Form1` and displayed through `eventLogListBox`. It should record check starts and finishes, errors, discovered servers, and status changes.
+
+The `Сервисы` tab is created in `Form1.BuildTabbedLayout()`. Do not discover service DNS names or IP addresses through subnet scanning: service addresses must be entered by the user or loaded from `%AppData%\NetworkMonitor\service_endpoints.json`. Only IPv4 resolution for an already configured DNS name is automatic through `Dns.GetHostAddressesAsync`; the result is checked in parallel through `ServiceChecker`. Do not run `ping -4` through cmd; it is only the user-facing equivalent of what the code does. A single service row may contain several DNS names or IP addresses separated by `;`; `ServiceChecker` should try candidates in order and display the first IPv4 address that replies to ping.
+
+The services table must be read-only. Do not bring back single-click cell editing. The top row of the `Сервисы` tab is a quick check row with one `DNS-имя или IP` field and a `Проверить` button. The button searches existing rows by name, DNS/IP, or resolved IPv4; if no row exists, it creates a new `ServiceEndpoint` where `Name` and `Address` are both the entered value, saves the list, and immediately checks it. Edit, delete, scan, and copy actions are done through the right-click context menu. A separate `Сохранить адреса` button is not needed: call `ServiceEndpointStore.Save` after add, edit, and delete actions.
+
+Text copying should work in `devicesGrid`, `servicesGrid`, and `eventLogListBox`. Ctrl+C copies the selected row or log entry. Right-clicking a table cell should expose a `Копировать` item for the current cell value.
 
 ### Data Storage
 
@@ -174,6 +217,28 @@ Known server IP addresses used by the 10-minute automatic check are stored here:
 ```
 
 The format is the same: a JSON string array. The same `ManualIpStore` class manages it with a different file name.
+
+The default service list is stored here:
+
+```text
+%AppData%\NetworkMonitor\default_services.json
+```
+
+The default source in the repository:
+
+```text
+NetworkMonitor/default_services.json
+```
+
+The repository file is embedded into the EXE as `NetworkMonitor.default_services.json`, so the installer can remain a single EXE. On first run, `ServiceEndpointStore` creates the user-profile default file from a file next to the application or from the embedded resource. Do not move default services back into a C# array.
+
+The current working service list for Covid19, Промед, DIGIPAX, RIS App, ARM EDN, and Telemed is stored here:
+
+```text
+%AppData%\NetworkMonitor\service_endpoints.json
+```
+
+The file is managed by `ServiceEndpointStore`. If the file does not exist yet, it is created from `default_services.json`. Current defaults are: `Covid19` - `covid19.vologdamed.local;10.35.0.66`, `Промед` - `rmisvo.cifromed35.ru`, `DIGIPAX` - `10.0.5.67`, `RIS App` - `172.24.3.11`, `ARM EDN` - `edn.vologdamed.local`, `Telemed` - `10.35.0.99`. If the working file already exists, loading should use the saved list, add missing default rows, and fill empty standard-service addresses from the defaults file.
 
 ### Installation
 
@@ -207,6 +272,7 @@ Expected artifacts:
 
 - Do not add an external network utility dependency for ping.
 - Do not add an external `nmblookup` dependency; NetBIOS server-name probing must remain built into the code.
+- Do not launch `ping -4` through cmd for service checks; use DNS IPv4 resolution in `ServiceChecker`.
 - Do not run long operations on the UI thread.
 - Do not bring back automatic full-network scans on the timer; the timer must check servers only.
 - Do not change the `manual_ips.json` format without updating `ManualIpStore` and the docs.
