@@ -10,11 +10,11 @@ Network Monitor - Windows-приложение для контроля дост�
 
 Приложение не запускает `cmd.exe`, `ping.exe`, `.bat` или `.ps1` для проверки доступности IP во вкладке `Сеть`. Доступность устройств в этой таблице определяется по открытым TCP-портам через `TcpClient`.
 
-Алгоритм вкладки `Сеть`: найти IP, проверить открытые порты, получить имя, сгруппировать IP с одинаковым именем в одну строку. Если у IP найден хотя бы один проверяемый открытый порт, строка считается `В сети`. Если открытых портов нет, строка считается `Недоступен`.
+Алгоритм вкладки `Сеть`: найти IP, проверить открытые порты, получить имя, сгруппировать IP с одинаковым именем в одну строку. Строка считается `В сети`, если у IP открыт TCP-порт `3389`. Остальные открытые порты показываются как детали, но не являются критерием статуса.
 
-NetBIOS-проверка имени аналогична `nmblookup -A <ip>`, но реализована внутри приложения на C#, без внешней утилиты `nmblookup`. Она нужна для получения имени сервера и группировки строк, а не как единственный критерий доступности.
+Название сервера программа сначала пытается получить из RDP-сертификата на TCP-порту `3389`. Сертификат читается через RDP Negotiation и TLS-подключение, без входа на сервер. Имя нужно для группировки строк, а не как критерий доступности.
 
-`nmblookup` не запускается как внешний файл. Для проверки имени сервера приложение само отправляет NetBIOS Node Status request на UDP-порт 137 нужного IP-адреса и разбирает ответ.
+Если сертификат не удалось прочитать или в нем нет имени, приложение пробует `ping.exe -a <ip>`, затем `nbtstat.exe -A <ip>`, затем встроенный запасной NetBIOS Node Status request на UDP-порт 137 нужного IP-адреса, затем reverse DNS.
 
 ### Как выбираются адреса для сканирования
 
@@ -36,11 +36,11 @@ NetBIOS-проверка имени аналогична `nmblookup -A <ip>`, н
 
 В нижней части окна есть `Журнал событий мониторинга`. В него пишутся запуск и завершение проверок, найденные серверы, ручные проверки, ошибки и изменения статуса устройств.
 
-При проверке выбранной строки таблицы журнал пишет подробный результат по каждому IP из этой строки. Формат: сначала `Проверка <имя>:`, затем отдельные строки вида `10.0.5.68: В сети, порты: 80, 389` или `192.170.1.7: Недоступен, открытых портов нет`.
+При проверке выбранной строки таблицы журнал пишет подробный результат по каждому IP из этой строки. Формат: сначала `Проверка <имя>:`, затем отдельные строки вида `10.0.5.68: В сети, порты: 80, 389, 3389`, `192.170.1.7: Недоступен, порты: 80, 443` или `192.170.1.8: Недоступен, открытых портов нет`.
 
 ### Как определяется имя устройства
 
-Для найденных IP программа сначала пытается получить имя через NetBIOS Node Status request по UDP/137, затем делает reverse DNS lookup через `Dns.GetHostEntryAsync`. Если DNS возвращает полное имя, в таблице показывается короткая часть до первой точки. Если имя определить не удалось, выводится `Неизвестное устройство`.
+Для найденных IP программа сначала пытается получить имя из RDP-сертификата на порту `3389`. Если имя не найдено, используется `ping.exe -a <ip>`, затем `nbtstat.exe -A <ip>` с выбором NetBIOS-записи `<20>` или `<00>`, затем встроенный NetBIOS Node Status request по UDP/137, затем reverse DNS lookup через `Dns.GetHostEntryAsync`. Если DNS возвращает полное имя, в таблице показывается короткая часть до первой точки. Если имя определить не удалось, выводится `Неизвестное устройство`.
 
 Если несколько IP-адресов возвращают одинаковое имя, они показываются в одной строке таблицы: `имя - IP-адреса - MAC-адреса - открытые порты - статус - ...`. IP без определенного имени не объединяются между собой, чтобы разные неизвестные устройства не смешивались в одну строку.
 
@@ -61,11 +61,11 @@ arp.exe -a
 - имя содержит признаки сервера: `server`, `srv`, `dc`, `sql`, `db`, `1c`, `ksc`, `mail`, `exchange`, `nas`, `storage`, `backup`, `terminal`, `rdp`, `web`, `app`;
 - открыт один из проверяемых TCP-портов: `22`, `25`, `53`, `80`, `110`, `143`, `389`, `443`, `465`, `587`, `636`, `993`, `995`, `1433`, `1521`, `3306`, `3389`, `5432`, `8080`, `8443`.
 
-Проверка портов выполняется через `TcpClient`, без запуска внешних утилит. Таймаут подключения к одному порту - 300 мс.
+Проверка портов выполняется через `TcpClient`, без запуска внешних утилит. Таймаут подключения к одному порту - 300 мс, для порта `3389` - 1000 мс.
 
 Вероятные серверы сортируются вверху таблицы и выделяются жирным шрифтом.
 
-Статус `В сети` ставится только при наличии хотя бы одного открытого проверяемого TCP-порта. Это защищает от ситуации, когда зависший сервер продолжает отвечать на ICMP ping, но рабочие сетевые службы уже не отвечают.
+Статус `В сети` ставится только при открытом TCP-порте `3389`. Это защищает от ситуации, когда зависший сервер продолжает отвечать на ICMP ping или второстепенные службы, но RDP-служба уже не отвечает.
 
 ### Где хранятся IP-адреса
 
@@ -190,11 +190,11 @@ Network Monitor is a Windows desktop application for checking device availabilit
 
 The application does not run `cmd.exe`, `ping.exe`, `.bat`, or `.ps1` files to check IP availability on the `Сеть` tab. Device availability in this table is determined by open TCP ports through `TcpClient`.
 
-The `Сеть` tab algorithm is: find IP addresses, check open ports, resolve names, then group IP addresses with the same name into one row. If an IP has at least one checked TCP port open, the row is marked online. If no checked port is open, it is marked unavailable.
+The `Сеть` tab algorithm is: find IP addresses, check open ports, resolve names, then group IP addresses with the same name into one row. A row is marked online only when TCP port `3389` is open. Other open ports are displayed as details, but they are not the status criterion.
 
-The NetBIOS name check is equivalent to the idea of `nmblookup -A <ip>`, but it is implemented inside the C# application, without requiring the external `nmblookup` utility. It is used to obtain server names and group rows, not as the only availability criterion.
+Server names are first read from the RDP certificate on TCP port `3389`. The certificate is read through RDP Negotiation and TLS without logging in to the server. The name is used for grouping rows, not as an availability criterion.
 
-`nmblookup` is not started as an external executable. For server name verification, the application sends its own NetBIOS Node Status request to UDP port 137 of the target IP and parses the response.
+If the certificate cannot be read or contains no usable name, the application tries `ping.exe -a <ip>`, then `nbtstat.exe -A <ip>`, then falls back to its built-in NetBIOS Node Status request over UDP/137, then reverse DNS.
 
 ### How Scan Targets Are Selected
 
@@ -214,13 +214,13 @@ Right-clicking a row on the `Сеть` tab opens a context menu: `Копиров
 
 The lower part of the window contains the monitoring event log. It records scan starts and finishes, discovered servers, manual checks, errors, and device status changes.
 
-When a selected table row is checked, the event log records a detailed result for each IP address in that row. The format is `Проверка <name>:` followed by lines such as `10.0.5.68: В сети, порты: 80, 389` or `192.170.1.7: Недоступен, открытых портов нет`.
+When a selected table row is checked, the event log records a detailed result for each IP address in that row. The format is `Проверка <name>:` followed by lines such as `10.0.5.68: В сети, порты: 80, 389, 3389`, `192.170.1.7: Недоступен, порты: 80, 443`, or `192.170.1.8: Недоступен, открытых портов нет`.
 
 Table text can be copied like in regular Windows applications: Ctrl+C copies the selected row, and right-clicking a cell opens a `Копировать` item for that exact value.
 
 ### Hostname Detection
 
-For discovered IP addresses, the application first tries a NetBIOS Node Status request over UDP/137, then performs a reverse DNS lookup by using `Dns.GetHostEntryAsync`. If DNS returns a full hostname, only the short name before the first dot is displayed. If no name can be resolved, the UI shows `Неизвестное устройство`.
+For discovered IP addresses, the application first tries to read the name from the RDP certificate on port `3389`. If no name is found, it uses `ping.exe -a <ip>`, then `nbtstat.exe -A <ip>` and selects the NetBIOS `<20>` or `<00>` entry, then uses the built-in NetBIOS Node Status request over UDP/137, then performs a reverse DNS lookup by using `Dns.GetHostEntryAsync`. If DNS returns a full hostname, only the short name before the first dot is displayed. If no name can be resolved, the UI shows `Неизвестное устройство`.
 
 If several IP addresses return the same hostname, they are displayed in one table row: `name - IP addresses - MAC addresses - open ports - status - ...`. IP addresses without a resolved hostname are not grouped together, so unrelated unknown devices are not mixed into one row.
 
@@ -241,11 +241,11 @@ Server detection is heuristic. A device is treated as a probable server when at 
 - the hostname contains server-like tokens: `server`, `srv`, `dc`, `sql`, `db`, `1c`, `ksc`, `mail`, `exchange`, `nas`, `storage`, `backup`, `terminal`, `rdp`, `web`, `app`;
 - one of the checked TCP ports is open: `22`, `25`, `53`, `80`, `110`, `143`, `389`, `443`, `465`, `587`, `636`, `993`, `995`, `1433`, `1521`, `3306`, `3389`, `5432`, `8080`, `8443`.
 
-Port checks are performed through `TcpClient`, without external tools. The connection timeout for one port is 300 ms.
+Port checks are performed through `TcpClient`, without external tools. The connection timeout is 300 ms for regular ports and 1000 ms for port `3389`.
 
 Probable servers are sorted to the top of the table and displayed in bold.
 
-The `В сети` status is set only when at least one checked TCP port is open. This avoids treating a hung server as online just because it still replies to ICMP ping while its network services no longer respond.
+The `В сети` status is set only when TCP port `3389` is open. This avoids treating a hung server as online just because it still replies to ICMP ping or secondary services while RDP no longer responds.
 
 ### IP Storage
 

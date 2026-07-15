@@ -949,13 +949,16 @@ public partial class Form1 : Form
 
     private static string FormatDeviceCheckLog(NetworkDevice device)
     {
+        var ports = string.IsNullOrWhiteSpace(device.OpenPorts)
+            ? "открытых портов нет"
+            : $"порты: {device.OpenPorts}";
+
         if (!device.IsOnline)
         {
-            return $"{device.IpAddress}: Недоступен, открытых портов нет";
+            return $"{device.IpAddress}: Недоступен, {ports}";
         }
 
-        var ports = string.IsNullOrWhiteSpace(device.OpenPorts) ? "нет данных" : device.OpenPorts;
-        return $"{device.IpAddress}: В сети, порты: {ports}";
+        return $"{device.IpAddress}: В сети, {ports}";
     }
 
     private bool IsKnownServerIp(string ipAddress)
