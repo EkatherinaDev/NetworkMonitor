@@ -52,14 +52,16 @@ MAC-адрес берется из ARP-кэша Windows. Для этого пр�
 arp.exe -a
 ```
 
-Затем вывод разбирается регулярным выражением. Это не используется для ping-проверки; `arp.exe` нужен только для отображения MAC-адреса уже известных соседних устройств.
+Затем вывод разбирается регулярным выражением. Это не используется для ping-проверки; `arp.exe` нужен только для отображения MAC-адреса уже известных соседних устройств. После проверки портов ARP-кэш читается повторно, чтобы заполнить MAC, который появился после сетевого подключения. Если IP находится за маршрутизатором, реальный MAC удаленного сервера может быть недоступен.
 
 ### Как определяются серверы
 
 Сервер определяется эвристически. Устройство считается вероятным сервером, если выполняется одно из условий:
 
 - имя содержит признаки сервера: `server`, `srv`, `dc`, `sql`, `db`, `1c`, `ksc`, `mail`, `exchange`, `nas`, `storage`, `backup`, `terminal`, `rdp`, `web`, `app`;
-- открыт один из проверяемых TCP-портов: `22`, `25`, `53`, `80`, `110`, `143`, `389`, `443`, `465`, `587`, `636`, `993`, `995`, `1433`, `1521`, `3306`, `3389`, `5432`, `8080`, `8443`.
+- открыт один из характерных серверных TCP-портов: `25`, `53`, `110`, `143`, `389`, `465`, `587`, `636`, `993`, `995`, `1433`, `1521`, `3306`, `5432`.
+
+Порты `80`, `443`, `3389`, `22`, `8080` и `8443` отображаются в таблице, но сами по себе не превращают устройство в тип `Сервер`, потому что они часто встречаются и на обычных устройствах.
 
 Проверка портов выполняется через `TcpClient`, без запуска внешних утилит. Таймаут подключения к одному порту - 300 мс, для порта `3389` - 1000 мс.
 
@@ -232,14 +234,16 @@ MAC addresses are read from the Windows ARP cache. For this part only, the appli
 arp.exe -a
 ```
 
-The output is parsed with a regular expression. This is not used for ping checks; `arp.exe` is used only to display MAC addresses for known neighboring devices.
+The output is parsed with a regular expression. This is not used for ping checks; `arp.exe` is used only to display MAC addresses for known neighboring devices. After port checks, the ARP cache is read again to fill MAC addresses that appeared after network connections. If an IP address is behind a router, the remote server's real MAC address may not be available.
 
 ### Server Detection
 
 Server detection is heuristic. A device is treated as a probable server when at least one condition is true:
 
 - the hostname contains server-like tokens: `server`, `srv`, `dc`, `sql`, `db`, `1c`, `ksc`, `mail`, `exchange`, `nas`, `storage`, `backup`, `terminal`, `rdp`, `web`, `app`;
-- one of the checked TCP ports is open: `22`, `25`, `53`, `80`, `110`, `143`, `389`, `443`, `465`, `587`, `636`, `993`, `995`, `1433`, `1521`, `3306`, `3389`, `5432`, `8080`, `8443`.
+- one of the distinctive server TCP ports is open: `25`, `53`, `110`, `143`, `389`, `465`, `587`, `636`, `993`, `995`, `1433`, `1521`, `3306`, `5432`.
+
+Ports `80`, `443`, `3389`, `22`, `8080`, and `8443` are displayed in the table, but they do not by themselves turn a row into type `Сервер`, because they are also common on ordinary devices.
 
 Port checks are performed through `TcpClient`, without external tools. The connection timeout is 300 ms for regular ports and 1000 ms for port `3389`.
 

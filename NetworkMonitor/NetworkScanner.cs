@@ -28,6 +28,7 @@ internal sealed partial class NetworkScanner
     private const uint RdpRequestedProtocols = RdpProtocolSsl | RdpProtocolHybrid | RdpProtocolHybridEx;
 
     private static readonly int[] ServerPorts = [22, 25, 53, 80, 110, 143, 389, 443, 465, 587, 636, 993, 995, 1433, 1521, 3306, RdpPort, 5432, 8080, 8443];
+    private static readonly int[] ServerIdentityPorts = [25, 53, 110, 143, 389, 465, 587, 636, 993, 995, 1433, 1521, 3306, 5432];
     private static readonly string[] ServerNameTokens = ["server", "srv", "dc", "sql", "db", "1c", "ksc", "mail", "exchange", "nas", "storage", "backup", "terminal", "rdp", "web", "app"];
     private static readonly byte[] RdpTlsNegotiationRequest =
     [
@@ -94,8 +95,11 @@ internal sealed partial class NetworkScanner
                 progress?.Report(new ScanProgress($"Проверено IP: {completed} из {scanTargets.Count}", completed, scanTargets.Count));
             });
 
+        var deviceList = devices.ToList();
+        await FillMissingMacAddressesAsync(deviceList, cancellationToken);
+
         return new NetworkScanResult(
-            devices.OrderByDescending(device => device.IsServer).ThenBy(device => ToSortableUInt32(IPAddress.Parse(device.IpAddress))).ToList(),
+            deviceList.OrderByDescending(device => device.IsServer).ThenBy(device => ToSortableUInt32(IPAddress.Parse(device.IpAddress))).ToList(),
             scannedAddressSet,
             manualAddressSet,
             DateTime.Now);
@@ -145,8 +149,11 @@ internal sealed partial class NetworkScanner
                 progress?.Report(new ScanProgress($"Проверено {label}: {completed} из {scanTargets.Count}", completed, scanTargets.Count));
             });
 
+        var deviceList = devices.ToList();
+        await FillMissingMacAddressesAsync(deviceList, cancellationToken);
+
         return new NetworkScanResult(
-            devices.OrderByDescending(device => device.IsServer).ThenBy(device => ToSortableUInt32(IPAddress.Parse(device.IpAddress))).ToList(),
+            deviceList.OrderByDescending(device => device.IsServer).ThenBy(device => ToSortableUInt32(IPAddress.Parse(device.IpAddress))).ToList(),
             scannedAddressSet,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase),
             DateTime.Now);
@@ -165,6 +172,7 @@ internal sealed partial class NetworkScanner
     {
         var arpCache = await ReadArpCacheAsync(cancellationToken);
         var device = await BuildCheckedDeviceAsync(address, source, arpCache, cancellationToken);
+        await FillMissingMacAddressesAsync([device], cancellationToken);
         if (requireServerNameResponse)
         {
             device.IsServer = true;
@@ -550,6 +558,20 @@ internal sealed partial class NetworkScanner
             return "";
         }
 
+        var escapedAddress = Regex.Escape(address.ToString());
+        var namedPingMatch = Regex.Match(
+            output,
+            $@"(?im)^\s*(?:Pinging|Обмен пакетами с)\s+(?<name>[^\[\r\n]+?)\s*\[{escapedAddress}\]",
+            RegexOptions.CultureInvariant);
+        if (namedPingMatch.Success)
+        {
+            var hostName = NormalizePingHostName(namedPingMatch.Groups["name"].Value, address);
+            if (!string.IsNullOrWhiteSpace(hostName))
+            {
+                return hostName;
+            }
+        }
+
         var addressMarker = $"[{address}]";
         foreach (var rawLine in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
         {
@@ -564,15 +586,28 @@ internal sealed partial class NetworkScanner
                 .Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries)
                 .LastOrDefault();
 
-            if (string.IsNullOrWhiteSpace(name) || name.Equals(address.ToString(), StringComparison.OrdinalIgnoreCase))
+            name = NormalizePingHostName(name ?? "", address);
+            if (string.IsNullOrWhiteSpace(name))
             {
                 continue;
             }
 
-            return SimplifyHostName(name);
+            return name;
         }
 
         return "";
+    }
+
+    private static string NormalizePingHostName(string value, IPAddress address)
+    {
+        var name = value.Trim().TrimEnd(':', '.');
+        if (string.IsNullOrWhiteSpace(name) || name.Equals(address.ToString(), StringComparison.OrdinalIgnoreCase))
+        {
+            return "";
+        }
+
+        var hostName = SimplifyHostName(name);
+        return hostName == NetworkDevice.UnknownHostName ? "" : hostName;
     }
 
     private static async Task<string> QueryNbtStatNameAsync(IPAddress address, CancellationToken cancellationToken)
@@ -905,18 +940,13 @@ internal sealed partial class NetworkScanner
 
     private static bool LooksLikeServer(string hostName, IReadOnlyCollection<int> openPorts)
     {
-        if (openPorts.Count > 0)
-        {
-            return true;
-        }
-
         var normalizedName = hostName.ToLowerInvariant();
         if (ServerNameTokens.Any(token => normalizedName.Contains(token, StringComparison.OrdinalIgnoreCase)))
         {
             return true;
         }
 
-        return openPorts.Any(port => port is 22 or 25 or 53 or 80 or 389 or 443 or 636 or 1433 or 1521 or 3306 or 3389 or 5432 or 8080 or 8443);
+        return openPorts.Any(port => ServerIdentityPorts.Contains(port));
     }
 
     private static List<IPAddress> DiscoverLocalScanTargets()
@@ -995,6 +1025,26 @@ internal sealed partial class NetworkScanner
             (byte)((value >> 8) & 0xFF),
             (byte)(value & 0xFF)
         ]);
+    }
+
+    private static async Task FillMissingMacAddressesAsync(IEnumerable<NetworkDevice> devices, CancellationToken cancellationToken)
+    {
+        var missingDevices = devices
+            .Where(device => string.IsNullOrWhiteSpace(device.MacAddress))
+            .ToList();
+        if (missingDevices.Count == 0)
+        {
+            return;
+        }
+
+        var refreshedArpCache = await ReadArpCacheAsync(cancellationToken);
+        foreach (var device in missingDevices)
+        {
+            if (refreshedArpCache.TryGetValue(device.IpAddress, out var macAddress))
+            {
+                device.MacAddress = macAddress;
+            }
+        }
     }
 
     private static async Task<IReadOnlyDictionary<string, string>> ReadArpCacheAsync(CancellationToken cancellationToken)

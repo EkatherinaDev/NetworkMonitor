@@ -34,11 +34,11 @@
 
 Для вкладки `Сеть` не используйте ping как критерий доступности. Статус строки должен определяться открытым TCP-портом `3389` через `TcpClient`. Остальные открытые порты показываются как детали. Для вкладки `Сервисы` ping допустим только через `Ping.SendPingAsync` из .NET, без `cmd`, `ping.exe`, batch-файлов или PowerShell.
 
-`arp.exe -a` запускается только для чтения ARP-кэша и показа MAC-адресов. Не используйте ARP как критерий доступности устройства.
+`arp.exe -a` запускается только для чтения ARP-кэша и показа MAC-адресов. Не используйте ARP как критерий доступности устройства. ARP-кэш читается до и после проверки портов, чтобы заполнить MAC, появившийся после сетевого подключения; для IP за маршрутизатором реальный MAC удаленного сервера может быть недоступен.
 
 `nmblookup` не должен быть внешней зависимостью приложения. Для получения имени сервера сначала читается RDP-сертификат на TCP-порту `3389`: `NetworkScanner` отправляет RDP Negotiation request, запускает TLS через `SslStream` и берет имя из сертификата. Если сертификат не дал имя, используются `ping.exe -a -n 1 -w 1000 <ip>`, `nbtstat.exe -A <ip>`, встроенный NetBIOS Node Status request по UDP/137 и reverse DNS. Имя нужно для отображения и группировки; статус online во вкладке `Сеть` ставится только при открытом `3389`.
 
-Проверка серверных портов выполняется через `TcpClient`. Список портов и токены имен находятся в `NetworkScanner`.
+Проверка серверных портов выполняется через `TcpClient`. Список портов и токены имен находятся в `NetworkScanner`. Не используйте любой открытый порт как признак типа `Сервер`: `80`, `443`, `3389`, `22`, `8080` и `8443` слишком общие и должны только отображаться как детали. Для типа `Сервер` используйте серверные токены имени или `ServerIdentityPorts`.
 
 Строки таблицы `Сеть` строятся через `NetworkDeviceGroup`: IP-адреса с одинаковым известным именем показываются в одной строке. `Неизвестное устройство` не группируется по имени, чтобы разные неизвестные IP оставались отдельными строками. `_devices` в `Form1` остается словарем по IP, потому что автопроверка и ручные проверки должны работать с реальными адресами.
 
@@ -181,11 +181,11 @@ This file documents the project internals for developers and future coding agent
 
 For the `Сеть` tab, do not use ping as the availability criterion. Row status must be determined by open TCP port `3389` through `TcpClient`. Other open ports are displayed as details. For the `Сервисы` tab, ping is allowed only through .NET `Ping.SendPingAsync`, without `cmd`, `ping.exe`, batch files, or PowerShell.
 
-`arp.exe -a` is launched only to read the Windows ARP cache and display MAC addresses. Do not use ARP as the source of truth for device availability.
+`arp.exe -a` is launched only to read the Windows ARP cache and display MAC addresses. Do not use ARP as the source of truth for device availability. The ARP cache is read before and after port checks to fill MAC addresses that appear after network connections; for IP addresses behind a router, the remote server's real MAC address may not be available.
 
 `nmblookup` must not be an external application dependency. Server name lookup first reads the RDP certificate on TCP port `3389`: `NetworkScanner` sends an RDP Negotiation request, starts TLS through `SslStream`, and takes the name from the certificate. If the certificate gives no name, it uses `ping.exe -a -n 1 -w 1000 <ip>`, `nbtstat.exe -A <ip>`, the built-in NetBIOS Node Status request over UDP/137, and reverse DNS. The name is used for display and grouping; online status on the `Сеть` tab requires port `3389` to be open.
 
-Server port checks are performed through `TcpClient`. The port list and hostname tokens are defined in `NetworkScanner`.
+Server port checks are performed through `TcpClient`. The port list and hostname tokens are defined in `NetworkScanner`. Do not use any open port as a `Сервер` type signal: `80`, `443`, `3389`, `22`, `8080`, and `8443` are too generic and should only be displayed as details. For the `Сервер` type, use server-like hostname tokens or `ServerIdentityPorts`.
 
 Rows in the `Сеть` table are built through `NetworkDeviceGroup`: IP addresses with the same known hostname are displayed in one row. `Неизвестное устройство` is not grouped by name, so unrelated unknown IP addresses remain separate rows. `_devices` in `Form1` remains keyed by IP because automatic and manual checks still need real addresses.
 
