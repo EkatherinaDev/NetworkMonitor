@@ -20,6 +20,9 @@
 - `NetworkMonitor/Form1.Designer.cs` - WinForms-разметка интерфейса.
 - `NetworkMonitor/NetworkScanner.cs` - ICMP ping, поиск адресов локальной сети, reverse DNS, ARP, TCP-проверка портов, определение серверов.
 - `NetworkMonitor/ServiceChecker.cs` - проверка сервисов через DNS IPv4 resolution и ping.
+- `NetworkMonitor/DefaultServerEndpoint.cs` - модель строки вкладки `Сервера`.
+- `NetworkMonitor/DefaultServerStore.cs` - загрузка и сохранение фиксированного списка серверов.
+- `NetworkMonitor/default_servers.json` - опциональный локальный шаблон списка серверов; файл игнорируется Git и не должен содержать приватные адреса в репозитории.
 - `NetworkMonitor/ServiceEndpoint.cs` - модель строки вкладки `Сервисы`.
 - `NetworkMonitor/ServiceEndpointStore.cs` - загрузка и сохранение адресов сервисов.
 - `NetworkMonitor/default_services.json` - дефолтный список сервисов, встраивается как ресурс и копируется в профиль пользователя.
@@ -32,31 +35,37 @@
 
 ### Важные архитектурные детали
 
-Для вкладки `Сеть` не используйте ping как критерий доступности. Статус строки должен определяться открытыми TCP-портами через `TcpClient`. Для вкладки `Сервисы` ping допустим только через `Ping.SendPingAsync` из .NET, без `cmd`, `ping.exe`, batch-файлов или PowerShell.
+Для вкладки `Сеть` не используйте ping как критерий доступности. Статус строки должен определяться открытым TCP-портом `3389` через `TcpClient`. Остальные открытые порты показываются как детали. Для вкладки `Сервисы` ping допустим только через `Ping.SendPingAsync` из .NET, без `cmd`, `ping.exe`, batch-файлов или PowerShell.
 
-`arp.exe -a` запускается только для чтения ARP-кэша и показа MAC-адресов. Не используйте ARP как критерий доступности устройства.
+Вкладка `Сервера` должна быть первой в `TabControl` и открываться при запуске приложения. Она читает фиксированный список из `%AppData%\NetworkMonitor\default_servers.json`. Этот файл создается из `NetworkMonitor/default_servers.json` рядом с приложением, из embedded resource или как пустой список только если файла еще нет. Сканирование сети, автообнаружение и `server_ips.json` не должны изменять `default_servers.json`. Изменение этого файла допускается только вручную пользователем или через контекстное меню вкладки `Сервера`.
 
-`nmblookup` не должен быть внешней зависимостью приложения. Для получения имени сервера используется встроенный NetBIOS Node Status request по UDP/137, реализованный в `NetworkScanner`. Имя нужно для отображения и группировки; статус online во вкладке `Сеть` ставится только при наличии открытого проверяемого TCP-порта.
+Проверка на вкладке `Сервера` выполняется по всем IP в строке: ICMP ping через `Ping.SendPingAsync`, проверка TCP-порта `3389` и попытка получить RDP-сертификат. Строка считается `В сети`, если хотя бы один IP одновременно ответил на ping и имеет открытый `3389`. Сертификат используется как дополнительная диагностика и источник имени; отсутствие сертификата само по себе не должно делать сервер недоступным. В журнал нужно писать подробный результат по каждому IP.
 
-Проверка серверных портов выполняется через `TcpClient`. Список портов и токены имен находятся в `NetworkScanner`.
+`arp.exe -a` запускается только для чтения ARP-кэша и показа MAC-адресов. Не используйте ARP как критерий доступности устройства. ARP-кэш читается до и после проверки портов, чтобы заполнить MAC, появившийся после сетевого подключения; для IP за маршрутизатором реальный MAC удаленного сервера может быть недоступен.
+
+`nmblookup` не должен быть внешней зависимостью приложения. Для получения имени сервера сначала читается RDP-сертификат на TCP-порту `3389`: `NetworkScanner` отправляет RDP Negotiation request, запускает TLS через `SslStream` и берет имя из сертификата. Если сертификат не дал имя, используются `ping.exe -a -n 1 -w 1000 <ip>`, `nbtstat.exe -A <ip>`, встроенный NetBIOS Node Status request по UDP/137 и reverse DNS. Имя нужно для отображения и группировки; статус online во вкладке `Сеть` ставится только при открытом `3389`.
+
+Проверка серверных портов выполняется через `TcpClient`. Список портов и токены имен находятся в `NetworkScanner`. Не используйте любой открытый порт как признак типа `Сервер`: `80`, `443`, `3389`, `22`, `8080` и `8443` слишком общие и должны только отображаться как детали. Для типа `Сервер` используйте серверные токены имени или `ServerIdentityPorts`.
 
 Строки таблицы `Сеть` строятся через `NetworkDeviceGroup`: IP-адреса с одинаковым известным именем показываются в одной строке. `Неизвестное устройство` не группируется по имени, чтобы разные неизвестные IP оставались отдельными строками. `_devices` в `Form1` остается словарем по IP, потому что автопроверка и ручные проверки должны работать с реальными адресами.
 
 Контекстное меню `devicesGrid` должно содержать `Копировать`, `Редактировать`, `Удалить`, `Проверить`. Для `NetworkDeviceGroup` действия применяются ко всем IP внутри строки. Удаление убирает IP из текущей таблицы, `manual_ips.json` и `server_ips.json`; автоматически найденный IP может появиться снова после полного сканирования, если у него открыты порты.
 
-Автоматическая проверка запускается WinForms-таймером в `Form1`: интервал 10 минут. Таймер должен проверять только известные серверные IP, а не всю подсеть. Полный обход сети должен запускаться только вручную кнопкой `Сканировать всю сеть`.
+Автоматическая проверка запускается WinForms-таймером в `Form1`: интервал 10 минут. Таймер должен проверять только строки вкладки `Сервера`, а не всю подсеть. Полный обход сети должен запускаться только вручную кнопкой `Сканировать всю сеть`.
 
 Сканирование должно оставаться асинхронным. Не блокируйте UI-поток ожиданием ping, DNS, ARP или TCP-портов.
 
 Журнал событий мониторинга находится в `Form1` и отображается через `eventLogListBox`. В журнал нужно писать запуск и завершение проверок, ошибки, найденные серверы и изменения статуса.
 
-При ручной проверке выбранной строки `devicesGrid` нужно логировать подробности по каждому IP из строки: заголовок `Проверка <имя>:` и отдельные записи `IP: В сети, порты: ...` или `IP: Недоступен, открытых портов нет`. Для этого используется `Form1.AddDeviceCheckDetailsToEventLog`.
+При ручной проверке выбранной строки `devicesGrid` нужно логировать подробности по каждому IP из строки: заголовок `Проверка <имя>:` и отдельные записи `IP: В сети, порты: ...`, `IP: Недоступен, порты: ...` или `IP: Недоступен, открытых портов нет`. Для этого используется `Form1.AddDeviceCheckDetailsToEventLog`.
 
 Вкладка `Сервисы` создается в `Form1.BuildTabbedLayout()`. Не ищите DNS-имя или IP сервиса обходом подсети: сервисный адрес должен быть введен пользователем или загружен из `%AppData%\NetworkMonitor\service_endpoints.json`. Автоматически определяется только IPv4 для уже заданного DNS-имени через `Dns.GetHostAddressesAsync`, затем адрес проверяется параллельно через `ServiceChecker`. Не запускайте `ping -4` через cmd; это только пользовательский аналог того, что делает код. Одна строка сервиса может содержать несколько DNS-имен или IP через `;`; `ServiceChecker` должен проверить кандидаты по очереди и вывести первый IPv4, который ответил на ping.
 
 Таблица сервисов должна быть read-only. Не возвращайте редактирование ячеек простым кликом. Верхняя строка вкладки `Сервисы` - это быстрая проверка по одному полю `DNS-имя или IP` и кнопке `Проверить`. Кнопка ищет существующую строку по названию, DNS/IP или найденному IPv4; если строки нет, создает новый `ServiceEndpoint`, где `Name` и `Address` равны введенному значению, сохраняет список и сразу запускает проверку. Редактирование, удаление, сканирование и копирование строки выполняются через контекстное меню правой кнопкой мыши. Отдельная кнопка `Сохранить адреса` не нужна: `ServiceEndpointStore.Save` вызывается после добавления, редактирования и удаления.
 
-В таблицах `devicesGrid` и `servicesGrid`, а также в `eventLogListBox` должно работать копирование текста. Ctrl+C копирует выбранную строку или запись журнала. Правый клик по ячейке таблицы должен давать пункт `Копировать` для значения текущей ячейки.
+Контекстное меню `defaultServersGrid` должно содержать `Копировать`, `Добавить`, `Редактировать`, `Удалить`, `Проверить`. Добавление, редактирование и удаление сохраняют `%AppData%\NetworkMonitor\default_servers.json`. Двойной клик по строке проверяет все IP внутри этой строки.
+
+В таблицах `defaultServersGrid`, `devicesGrid` и `servicesGrid`, а также в `eventLogListBox` должно работать копирование текста. Ctrl+C копирует выбранную строку или запись журнала. Правый клик по ячейке таблицы должен давать пункт `Копировать` для значения текущей ячейки.
 
 ### Хранение данных
 
@@ -76,7 +85,32 @@
 
 Не храните этот файл рядом с EXE в `Program Files`, потому что обычный пользователь может не иметь прав на запись.
 
-Известные серверные IP, которые проверяются автоматически каждые 10 минут, хранятся здесь:
+Фиксированный список серверов для вкладки `Сервера` и автоматической проверки каждые 10 минут хранится здесь:
+
+```text
+%AppData%\NetworkMonitor\default_servers.json
+```
+
+Опциональный локальный шаблон рядом с приложением:
+
+```text
+NetworkMonitor/default_servers.json
+```
+
+Формат:
+
+```json
+[
+  {
+    "name": "SERVER-NAME",
+    "address": "192.168.1.10; 192.168.1.11"
+  }
+]
+```
+
+Файл обслуживается `DefaultServerStore`. `NetworkMonitor/default_servers.json` игнорируется Git, чтобы не публиковать приватные адреса. Если пользовательский файл уже существует, его нельзя автоматически сливать, пополнять или перезаписывать локальным шаблоном. Сканирование сети не должно вызывать `DefaultServerStore.Save`.
+
+Известные серверные IP, найденные вкладкой `Сеть`, хранятся здесь:
 
 ```text
 %AppData%\NetworkMonitor\server_ips.json
@@ -136,12 +170,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 ### Правила изменений
 
-- Не используйте ping как критерий статуса на вкладке `Сеть`; доступность там определяется открытыми TCP-портами.
+- Не используйте ping как критерий статуса на вкладке `Сеть`; доступность там определяется открытым TCP-портом `3389`.
 - Не добавляйте зависимость от внешних сетевых утилит для ping на вкладке `Сервисы`.
-- Не добавляйте зависимость от внешней утилиты `nmblookup`; NetBIOS-опрос имени сервера должен оставаться встроенным в код.
+- Не добавляйте зависимость от внешней утилиты `nmblookup`; для имени используйте RDP-сертификат на `3389`, затем `ping.exe -a <ip>`, `nbtstat.exe -A <ip>` и встроенный UDP/137 fallback.
 - Не добавляйте запуск `ping -4` через cmd для сервисов; используйте DNS IPv4 resolution в `ServiceChecker`.
 - Не запускайте долгие операции в UI-потоке.
-- Не возвращайте автоматическое сканирование всей сети по таймеру; таймер должен проверять только серверы.
+- Не возвращайте автоматическое сканирование всей сети по таймеру; таймер должен проверять только вкладку `Сервера`.
+- Не изменяйте `%AppData%\NetworkMonitor\default_servers.json` из результатов сканирования сети или автообнаружения серверов.
 - Не меняйте формат `manual_ips.json` без обновления `ManualIpStore` и документации.
 - Не меняйте формат `server_ips.json` без обновления `ManualIpStore` и документации.
 - Если меняете серверные порты или критерии имени, обновите `README.md`.
@@ -167,6 +202,9 @@ This file documents the project internals for developers and future coding agent
 - `NetworkMonitor/Form1.Designer.cs` - WinForms UI layout.
 - `NetworkMonitor/NetworkScanner.cs` - ICMP ping, local target discovery, reverse DNS, ARP, TCP port checks, server detection.
 - `NetworkMonitor/ServiceChecker.cs` - service checks through DNS IPv4 resolution and ping.
+- `NetworkMonitor/DefaultServerEndpoint.cs` - row model for the `Сервера` tab.
+- `NetworkMonitor/DefaultServerStore.cs` - fixed server list loading and saving.
+- `NetworkMonitor/default_servers.json` - optional local server-list template; the file is ignored by Git and must not contain private addresses in the repository.
 - `NetworkMonitor/ServiceEndpoint.cs` - row model for the `Сервисы` tab.
 - `NetworkMonitor/ServiceEndpointStore.cs` - service address loading and saving.
 - `NetworkMonitor/default_services.json` - default service list, embedded as a resource and copied to the user profile.
@@ -179,31 +217,37 @@ This file documents the project internals for developers and future coding agent
 
 ### Important Architecture Notes
 
-For the `Сеть` tab, do not use ping as the availability criterion. Row status must be determined by open TCP ports through `TcpClient`. For the `Сервисы` tab, ping is allowed only through .NET `Ping.SendPingAsync`, without `cmd`, `ping.exe`, batch files, or PowerShell.
+For the `Сеть` tab, do not use ping as the availability criterion. Row status must be determined by open TCP port `3389` through `TcpClient`. Other open ports are displayed as details. For the `Сервисы` tab, ping is allowed only through .NET `Ping.SendPingAsync`, without `cmd`, `ping.exe`, batch files, or PowerShell.
 
-`arp.exe -a` is launched only to read the Windows ARP cache and display MAC addresses. Do not use ARP as the source of truth for device availability.
+The `Сервера` tab must be the first `TabControl` tab and open when the application starts. It reads the fixed list from `%AppData%\NetworkMonitor\default_servers.json`. This file is created from `NetworkMonitor/default_servers.json` next to the application, from the embedded resource, or as an empty list only when the user-profile file does not exist. Network scans, automatic discovery, and `server_ips.json` must not change `default_servers.json`. This file may be changed only manually by the user or through the `Сервера` tab context menu.
 
-`nmblookup` must not be an external application dependency. Server name lookup uses the built-in NetBIOS Node Status request over UDP/137 implemented in `NetworkScanner`. The name is used for display and grouping; online status on the `Сеть` tab requires at least one checked TCP port to be open.
+Checks on the `Сервера` tab run for every IP address in a row: ICMP ping through `Ping.SendPingAsync`, TCP port `3389` check, and an attempt to retrieve the RDP certificate. A row is marked `В сети` when at least one IP both replies to ping and has `3389` open. The certificate is used as extra diagnostics and a hostname source; failure to read it must not by itself make the server unavailable. The event log should include a detailed result for every IP address.
 
-Server port checks are performed through `TcpClient`. The port list and hostname tokens are defined in `NetworkScanner`.
+`arp.exe -a` is launched only to read the Windows ARP cache and display MAC addresses. Do not use ARP as the source of truth for device availability. The ARP cache is read before and after port checks to fill MAC addresses that appear after network connections; for IP addresses behind a router, the remote server's real MAC address may not be available.
+
+`nmblookup` must not be an external application dependency. Server name lookup first reads the RDP certificate on TCP port `3389`: `NetworkScanner` sends an RDP Negotiation request, starts TLS through `SslStream`, and takes the name from the certificate. If the certificate gives no name, it uses `ping.exe -a -n 1 -w 1000 <ip>`, `nbtstat.exe -A <ip>`, the built-in NetBIOS Node Status request over UDP/137, and reverse DNS. The name is used for display and grouping; online status on the `Сеть` tab requires port `3389` to be open.
+
+Server port checks are performed through `TcpClient`. The port list and hostname tokens are defined in `NetworkScanner`. Do not use any open port as a `Сервер` type signal: `80`, `443`, `3389`, `22`, `8080`, and `8443` are too generic and should only be displayed as details. For the `Сервер` type, use server-like hostname tokens or `ServerIdentityPorts`.
 
 Rows in the `Сеть` table are built through `NetworkDeviceGroup`: IP addresses with the same known hostname are displayed in one row. `Неизвестное устройство` is not grouped by name, so unrelated unknown IP addresses remain separate rows. `_devices` in `Form1` remains keyed by IP because automatic and manual checks still need real addresses.
 
 The `devicesGrid` context menu should contain `Копировать`, `Редактировать`, `Удалить`, `Проверить`. For a `NetworkDeviceGroup`, actions apply to all IP addresses inside the row. Delete removes IP addresses from the current table, `manual_ips.json`, and `server_ips.json`; an automatically discovered IP can appear again after a full scan if it has open ports.
 
-Automatic checking is started by a WinForms timer in `Form1`: the interval is 10 minutes. The timer must check only known server IP addresses, not the whole subnet. Full network enumeration must be started only manually by the `Сканировать всю сеть` button.
+Automatic checking is started by a WinForms timer in `Form1`: the interval is 10 minutes. The timer must check only rows from the `Сервера` tab, not the whole subnet. Full network enumeration must be started only manually by the `Сканировать всю сеть` button.
 
 Scanning must remain asynchronous. Do not block the UI thread while waiting for ping, DNS, ARP, or TCP port checks.
 
 The monitoring event log is owned by `Form1` and displayed through `eventLogListBox`. It should record check starts and finishes, errors, discovered servers, and status changes.
 
-When a selected `devicesGrid` row is checked manually, log details for each IP address in that row: a `Проверка <name>:` header and separate `IP: В сети, порты: ...` or `IP: Недоступен, открытых портов нет` entries. This is handled by `Form1.AddDeviceCheckDetailsToEventLog`.
+When a selected `devicesGrid` row is checked manually, log details for each IP address in that row: a `Проверка <name>:` header and separate `IP: В сети, порты: ...`, `IP: Недоступен, порты: ...`, or `IP: Недоступен, открытых портов нет` entries. This is handled by `Form1.AddDeviceCheckDetailsToEventLog`.
 
 The `Сервисы` tab is created in `Form1.BuildTabbedLayout()`. Do not discover service DNS names or IP addresses through subnet scanning: service addresses must be entered by the user or loaded from `%AppData%\NetworkMonitor\service_endpoints.json`. Only IPv4 resolution for an already configured DNS name is automatic through `Dns.GetHostAddressesAsync`; the result is checked in parallel through `ServiceChecker`. Do not run `ping -4` through cmd; it is only the user-facing equivalent of what the code does. A single service row may contain several DNS names or IP addresses separated by `;`; `ServiceChecker` should try candidates in order and display the first IPv4 address that replies to ping.
 
 The services table must be read-only. Do not bring back single-click cell editing. The top row of the `Сервисы` tab is a quick check row with one `DNS-имя или IP` field and a `Проверить` button. The button searches existing rows by name, DNS/IP, or resolved IPv4; if no row exists, it creates a new `ServiceEndpoint` where `Name` and `Address` are both the entered value, saves the list, and immediately checks it. Edit, delete, scan, and copy actions are done through the right-click context menu. A separate `Сохранить адреса` button is not needed: call `ServiceEndpointStore.Save` after add, edit, and delete actions.
 
-Text copying should work in `devicesGrid`, `servicesGrid`, and `eventLogListBox`. Ctrl+C copies the selected row or log entry. Right-clicking a table cell should expose a `Копировать` item for the current cell value.
+The `defaultServersGrid` context menu should contain `Копировать`, `Добавить`, `Редактировать`, `Удалить`, `Проверить`. Add, edit, and delete actions save `%AppData%\NetworkMonitor\default_servers.json`. Double-clicking a row checks every IP address inside that row.
+
+Text copying should work in `defaultServersGrid`, `devicesGrid`, `servicesGrid`, and `eventLogListBox`. Ctrl+C copies the selected row or log entry. Right-clicking a table cell should expose a `Копировать` item for the current cell value.
 
 ### Data Storage
 
@@ -223,7 +267,32 @@ Format:
 
 Do not store this file next to the EXE under `Program Files`, because normal users may not have write permission there.
 
-Known server IP addresses used by the 10-minute automatic check are stored here:
+The fixed server list for the `Сервера` tab and the 10-minute automatic check is stored here:
+
+```text
+%AppData%\NetworkMonitor\default_servers.json
+```
+
+Optional local template next to the application:
+
+```text
+NetworkMonitor/default_servers.json
+```
+
+Format:
+
+```json
+[
+  {
+    "name": "SERVER-NAME",
+    "address": "192.168.1.10; 192.168.1.11"
+  }
+]
+```
+
+The file is managed by `DefaultServerStore`. `NetworkMonitor/default_servers.json` is ignored by Git to avoid publishing private addresses. If the user-profile file already exists, do not automatically merge, populate, or overwrite it with a local template. Network scans must not call `DefaultServerStore.Save`.
+
+Known server IP addresses discovered by the `Сеть` tab are stored here:
 
 ```text
 %AppData%\NetworkMonitor\server_ips.json
@@ -283,12 +352,13 @@ Expected artifacts:
 
 ### Change Rules
 
-- Do not use ping as the status criterion on the `Сеть` tab; availability there is determined by open TCP ports.
+- Do not use ping as the status criterion on the `Сеть` tab; availability there is determined by open TCP port `3389`.
 - Do not add an external network utility dependency for ping on the `Сервисы` tab.
-- Do not add an external `nmblookup` dependency; NetBIOS server-name probing must remain built into the code.
+- Do not add an external `nmblookup` dependency; use the RDP certificate on `3389`, then `ping.exe -a <ip>`, `nbtstat.exe -A <ip>`, and the built-in UDP/137 fallback for names.
 - Do not launch `ping -4` through cmd for service checks; use DNS IPv4 resolution in `ServiceChecker`.
 - Do not run long operations on the UI thread.
-- Do not bring back automatic full-network scans on the timer; the timer must check servers only.
+- Do not bring back automatic full-network scans on the timer; the timer must check only the `Сервера` tab.
+- Do not modify `%AppData%\NetworkMonitor\default_servers.json` from network scan results or automatic server discovery.
 - Do not change the `manual_ips.json` format without updating `ManualIpStore` and the docs.
 - Do not change the `server_ips.json` format without updating `ManualIpStore` and the docs.
 - If server ports or hostname criteria change, update `README.md`.

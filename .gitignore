@@ -5,3 +5,4 @@ artifacts/
 .vs/
 *.user
 NetworkMonitor/default_services.json
+NetworkMonitor/default_servers.json

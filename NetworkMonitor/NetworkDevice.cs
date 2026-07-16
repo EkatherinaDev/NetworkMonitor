@@ -12,6 +12,8 @@ internal sealed class NetworkDevice
     public bool IsOnline { get; set; }
     public bool IsServer { get; set; }
     public bool NameResponded { get; set; }
+    public bool RdpCertificateResponded { get; set; }
+    public string RdpCertificateName { get; set; } = "";
     public DateTime CheckedAt { get; set; } = DateTime.Now;
     public string Source { get; set; } = "Автосканирование";
     public string OpenPorts { get; set; } = "";

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 
 namespace NetworkMonitor;
 
@@ -12,28 +13,40 @@ public partial class Form1 : Form
     private readonly ServiceChecker _serviceChecker = new();
     private readonly ManualIpStore _manualIpStore = new();
     private readonly ManualIpStore _serverIpStore = new("server_ips.json");
+    private readonly DefaultServerStore _defaultServerStore = new();
     private readonly ServiceEndpointStore _serviceEndpointStore = new();
     private readonly Dictionary<string, NetworkDevice> _devices = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _manualIpAddresses;
     private readonly List<string> _serverIpAddresses;
+    private readonly List<DefaultServerEndpoint> _defaultServers;
     private readonly List<ServiceEndpoint> _services;
     private CancellationTokenSource? _scanCancellation;
+    private CancellationTokenSource? _defaultServerCancellation;
     private CancellationTokenSource? _serviceCancellation;
     private bool _scanInProgress;
+    private bool _defaultServerCheckInProgress;
     private bool _serviceCheckInProgress;
     private Font? _serverRowFont;
     private TabControl mainTabs = null!;
+    private DataGridView defaultServersGrid = null!;
     private DataGridView servicesGrid = null!;
+    private Button checkDefaultServersButton = null!;
     private TextBox serviceSearchTextBox = null!;
     private Button checkServiceSearchButton = null!;
     private Button checkServicesButton = null!;
     private ContextMenuStrip deviceContextMenu = null!;
+    private ContextMenuStrip defaultServerContextMenu = null!;
     private ContextMenuStrip serviceContextMenu = null!;
     private ContextMenuStrip eventLogContextMenu = null!;
     private ToolStripMenuItem copyDeviceCellMenuItem = null!;
     private ToolStripMenuItem editDeviceMenuItem = null!;
     private ToolStripMenuItem deleteDeviceMenuItem = null!;
     private ToolStripMenuItem checkDeviceMenuItem = null!;
+    private ToolStripMenuItem copyDefaultServerCellMenuItem = null!;
+    private ToolStripMenuItem addDefaultServerMenuItem = null!;
+    private ToolStripMenuItem editDefaultServerMenuItem = null!;
+    private ToolStripMenuItem deleteDefaultServerMenuItem = null!;
+    private ToolStripMenuItem checkDefaultServerMenuItem = null!;
     private ToolStripMenuItem copyServiceCellMenuItem = null!;
     private ToolStripMenuItem copyEventLogMenuItem = null!;
     private ToolStripMenuItem editServiceMenuItem = null!;
@@ -44,26 +57,30 @@ public partial class Form1 : Form
     {
         _manualIpAddresses = _manualIpStore.Load();
         _serverIpAddresses = _serverIpStore.Load();
+        _defaultServers = _defaultServerStore.Load();
         _services = _serviceEndpointStore.Load();
         InitializeComponent();
         BuildTabbedLayout();
         ConfigureGrid();
+        ConfigureDefaultServersGrid();
         ConfigureServicesGrid();
         ConfigureEventLogCopy();
+        RenderDefaultServers();
         RenderServices();
 
         autoScanTimer.Interval = 10 * 60 * 1000;
-        autoScanTimer.Tick += async (_, _) => await RunServerScanAsync("Автоматическая проверка серверов");
+        autoScanTimer.Tick += async (_, _) => await RunDefaultServerChecksAsync(_defaultServers, "Автоматическая проверка серверов");
         autoScanTimer.Start();
 
         Shown += async (_, _) =>
         {
-            AddEventLog("Приложение запущено. Автоматически проверяются только известные серверы.");
-            await RunServerScanAsync("Первичная проверка серверов");
+            AddEventLog("Приложение запущено. Автоматически проверяются только серверы из вкладки Сервера.");
+            await RunDefaultServerChecksAsync(_defaultServers, "Первичная проверка серверов");
         };
         FormClosing += (_, _) =>
         {
             _scanCancellation?.Cancel();
+            _defaultServerCancellation?.Cancel();
             _serviceCancellation?.Cancel();
         };
     }
@@ -149,6 +166,9 @@ public partial class Form1 : Form
             Margin = new Padding(0, 0, 0, 0)
         };
 
+        var defaultServersTab = new TabPage("Сервера");
+        defaultServersTab.Controls.Add(BuildDefaultServersLayout());
+
         var networkTab = new TabPage("Сеть");
         var networkLayout = new TableLayoutPanel
         {
@@ -166,14 +186,604 @@ public partial class Form1 : Form
         var servicesTab = new TabPage("Сервисы");
         servicesTab.Controls.Add(BuildServicesLayout());
 
+        mainTabs.TabPages.Add(defaultServersTab);
         mainTabs.TabPages.Add(networkTab);
         mainTabs.TabPages.Add(servicesTab);
+        mainTabs.SelectedIndex = 0;
 
         rootLayout.Controls.Add(mainTabs, 0, 1);
         rootLayout.Controls.Add(eventLogGroupBox, 0, 2);
         rootLayout.Controls.Add(footerLayout, 0, 3);
 
         rootLayout.ResumeLayout(true);
+    }
+
+    private Control BuildDefaultServersLayout()
+    {
+        var serversLayout = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(0)
+        };
+        serversLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        serversLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        serversLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+        var serversActionPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 8, 0, 8),
+            WrapContents = true
+        };
+
+        checkDefaultServersButton = new Button
+        {
+            AutoSize = true,
+            Text = "Проверить серверы",
+            UseVisualStyleBackColor = true,
+            Margin = new Padding(0, 2, 8, 2)
+        };
+        checkDefaultServersButton.Click += checkDefaultServersButton_Click;
+        serversActionPanel.Controls.Add(checkDefaultServersButton);
+
+        defaultServerContextMenu = BuildDefaultServerContextMenu();
+        defaultServersGrid = new DataGridView
+        {
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AllowUserToResizeRows = false,
+            BackgroundColor = SystemColors.Window,
+            BorderStyle = BorderStyle.Fixed3D,
+            ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText,
+            ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize,
+            ContextMenuStrip = defaultServerContextMenu,
+            Dock = DockStyle.Fill,
+            EditMode = DataGridViewEditMode.EditProgrammatically,
+            Margin = new Padding(0),
+            MultiSelect = false,
+            ReadOnly = true,
+            RowHeadersWidth = 48,
+            RowTemplate = { Height = 30 },
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect
+        };
+        defaultServersGrid.CellDoubleClick += defaultServersGrid_CellDoubleClick;
+        defaultServersGrid.KeyDown += dataGridView_KeyDown;
+        defaultServersGrid.MouseDown += defaultServersGrid_MouseDown;
+
+        serversLayout.Controls.Add(serversActionPanel, 0, 0);
+        serversLayout.Controls.Add(defaultServersGrid, 0, 1);
+        return serversLayout;
+    }
+
+    private ContextMenuStrip BuildDefaultServerContextMenu()
+    {
+        var contextMenu = new ContextMenuStrip();
+        copyDefaultServerCellMenuItem = new ToolStripMenuItem("Копировать");
+        addDefaultServerMenuItem = new ToolStripMenuItem("Добавить");
+        editDefaultServerMenuItem = new ToolStripMenuItem("Редактировать");
+        deleteDefaultServerMenuItem = new ToolStripMenuItem("Удалить");
+        checkDefaultServerMenuItem = new ToolStripMenuItem("Проверить");
+
+        copyDefaultServerCellMenuItem.Click += (_, _) => CopyCurrentGridCell(defaultServersGrid);
+        addDefaultServerMenuItem.Click += addDefaultServerMenuItem_Click;
+        editDefaultServerMenuItem.Click += editDefaultServerMenuItem_Click;
+        deleteDefaultServerMenuItem.Click += deleteDefaultServerMenuItem_Click;
+        checkDefaultServerMenuItem.Click += checkDefaultServerMenuItem_Click;
+
+        contextMenu.Items.AddRange([
+            copyDefaultServerCellMenuItem,
+            new ToolStripSeparator(),
+            addDefaultServerMenuItem,
+            editDefaultServerMenuItem,
+            deleteDefaultServerMenuItem,
+            new ToolStripSeparator(),
+            checkDefaultServerMenuItem
+        ]);
+
+        contextMenu.Opening += (_, _) =>
+        {
+            var hasSelectedServer = GetSelectedDefaultServer() is not null;
+            var canChangeServers = !_defaultServerCheckInProgress;
+            copyDefaultServerCellMenuItem.Enabled = hasSelectedServer && defaultServersGrid.CurrentCell is not null;
+            addDefaultServerMenuItem.Enabled = canChangeServers;
+            editDefaultServerMenuItem.Enabled = hasSelectedServer && canChangeServers;
+            deleteDefaultServerMenuItem.Enabled = hasSelectedServer && canChangeServers;
+            checkDefaultServerMenuItem.Enabled = hasSelectedServer && canChangeServers;
+        };
+
+        return contextMenu;
+    }
+
+    private void ConfigureDefaultServersGrid()
+    {
+        defaultServersGrid.Columns.Clear();
+        defaultServersGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "Сервер", Width = 150, ReadOnly = true });
+        defaultServersGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Address", HeaderText = "IP-адреса", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 220 });
+        defaultServersGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Mac", HeaderText = "MAC-адреса", Width = 160, ReadOnly = true });
+        defaultServersGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Ports", HeaderText = "Открытые порты", Width = 155, ReadOnly = true });
+        defaultServersGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "Статус", Width = 115, ReadOnly = true });
+        defaultServersGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Ping", HeaderText = "Ping", Width = 110, ReadOnly = true });
+        defaultServersGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Rdp", HeaderText = "3389 / сертификат", Width = 150, ReadOnly = true });
+        defaultServersGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "DetectedNames", HeaderText = "Найденные имена", Width = 170, ReadOnly = true });
+        defaultServersGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "CheckedAt", HeaderText = "Проверено", Width = 105, ReadOnly = true });
+    }
+
+    private void RenderDefaultServers()
+    {
+        defaultServersGrid.SuspendLayout();
+        defaultServersGrid.Rows.Clear();
+
+        foreach (var server in _defaultServers)
+        {
+            var rowIndex = defaultServersGrid.Rows.Add(
+                server.Name,
+                server.Address,
+                server.MacAddresses,
+                server.OpenPorts,
+                server.CheckedAt is null ? "Не проверено" : server.StatusText,
+                server.PingStatus,
+                server.RdpStatus,
+                server.DetectedNames,
+                server.CheckedAtText);
+
+            var row = defaultServersGrid.Rows[rowIndex];
+            row.Tag = server;
+
+            if (server.CheckedAt is not null)
+            {
+                row.Cells["Status"].Style.ForeColor = server.IsOnline ? Color.ForestGreen : Color.Firebrick;
+            }
+        }
+
+        defaultServersGrid.ResumeLayout();
+    }
+
+    private void SaveDefaultServers()
+    {
+        _defaultServerStore.Save(_defaultServers);
+    }
+
+    private DefaultServerEndpoint? GetSelectedDefaultServer()
+    {
+        return defaultServersGrid.CurrentRow?.Tag as DefaultServerEndpoint;
+    }
+
+    private void SelectDefaultServerRow(DefaultServerEndpoint server)
+    {
+        foreach (DataGridViewRow row in defaultServersGrid.Rows)
+        {
+            if (!ReferenceEquals(row.Tag, server))
+            {
+                continue;
+            }
+
+            defaultServersGrid.ClearSelection();
+            row.Selected = true;
+            defaultServersGrid.CurrentCell = row.Cells[0];
+            return;
+        }
+    }
+
+    private bool HasDefaultServerName(string name, DefaultServerEndpoint? excludedServer = null)
+    {
+        return _defaultServers.Any(server =>
+            !ReferenceEquals(server, excludedServer)
+            && server.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task RunDefaultServerChecksAsync(IEnumerable<DefaultServerEndpoint> serversToCheck, string reason)
+    {
+        if (_defaultServerCheckInProgress || _scanInProgress)
+        {
+            statusLabel.Text = "Другая сетевая проверка уже выполняется.";
+            return;
+        }
+
+        var selectedServers = serversToCheck.Distinct().ToList();
+        if (selectedServers.Count == 0)
+        {
+            statusLabel.Text = "Нет серверов для проверки.";
+            AddEventLog("Проверка серверов пропущена: список пуст.");
+            return;
+        }
+
+        var serverIpMap = new Dictionary<DefaultServerEndpoint, List<string>>();
+        var invalidServers = new List<(DefaultServerEndpoint Server, string InvalidValue)>();
+
+        foreach (var server in selectedServers)
+        {
+            if (!TryParseIpAddressList(server.Address, out var ipAddresses, out var invalidValue))
+            {
+                invalidServers.Add((server, invalidValue));
+                continue;
+            }
+
+            if (ipAddresses.Count == 0)
+            {
+                invalidServers.Add((server, "пустой список IP"));
+                continue;
+            }
+
+            serverIpMap[server] = ipAddresses;
+        }
+
+        _defaultServerCheckInProgress = true;
+        _defaultServerCancellation?.Cancel();
+        _defaultServerCancellation = new CancellationTokenSource();
+        SetDefaultServerCheckState(false, reason);
+        AddEventLog($"{reason}: серверов {selectedServers.Count}.");
+
+        try
+        {
+            foreach (var (server, invalidValue) in invalidServers)
+            {
+                MarkDefaultServerInvalid(server, $"Некорректный IP: {invalidValue}");
+                AddEventLog($"{server.Name}: некорректный IP: {invalidValue}.");
+            }
+
+            var allIpAddresses = serverIpMap.Values
+                .SelectMany(ipAddresses => ipAddresses)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => NetworkScanner.ToSortableUInt32(IPAddress.Parse(value)))
+                .ToList();
+
+            if (allIpAddresses.Count > 0)
+            {
+                var progress = new Progress<ScanProgress>(UpdateProgress);
+                var result = await _scanner.CheckAddressesAsync(
+                    allIpAddresses,
+                    reason,
+                    progress,
+                    _defaultServerCancellation.Token,
+                    forceServer: true);
+
+                var devicesByIp = result.Devices.ToDictionary(device => device.IpAddress, StringComparer.OrdinalIgnoreCase);
+                var pingResults = await PingIpAddressesAsync(allIpAddresses, _defaultServerCancellation.Token);
+
+                foreach (var (server, ipAddresses) in serverIpMap)
+                {
+                    ApplyDefaultServerCheckResult(server, ipAddresses, devicesByIp, pingResults);
+                    AddDefaultServerCheckDetailsToEventLog(server);
+                }
+            }
+
+            RenderDefaultServers();
+            lastUpdateLabel.Text = $"Последняя проверка серверов: {DateTime.Now:HH:mm:ss}";
+
+            var onlineCount = selectedServers.Count(server => server.CheckedAt is not null && server.IsOnline);
+            var offlineCount = selectedServers.Count(server => server.CheckedAt is not null && !server.IsOnline);
+            statusLabel.Text = $"Проверка серверов завершена. В сети: {onlineCount}, недоступно: {offlineCount}";
+            AddEventLog($"Проверка серверов завершена: в сети {onlineCount}, недоступно {offlineCount}.");
+        }
+        catch (OperationCanceledException)
+        {
+            statusLabel.Text = "Проверка серверов остановлена.";
+            AddEventLog("Проверка серверов остановлена.");
+        }
+        catch (Exception ex)
+        {
+            statusLabel.Text = "Ошибка проверки серверов.";
+            AddEventLog($"Ошибка проверки серверов: {ex.Message}");
+            MessageBox.Show($"Ошибка проверки серверов: {ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetDefaultServerCheckState(true, "");
+            _defaultServerCheckInProgress = false;
+        }
+    }
+
+    private void SetDefaultServerCheckState(bool enabled, string status)
+    {
+        checkDefaultServersButton.Enabled = enabled;
+        addDefaultServerMenuItem.Enabled = enabled;
+        editDefaultServerMenuItem.Enabled = enabled;
+        deleteDefaultServerMenuItem.Enabled = enabled;
+        checkDefaultServerMenuItem.Enabled = enabled;
+        scanProgressBar.Visible = !enabled;
+        scanProgressBar.Value = 0;
+
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            statusLabel.Text = status;
+        }
+    }
+
+    private static async Task<IReadOnlyDictionary<string, bool>> PingIpAddressesAsync(
+        IReadOnlyList<string> ipAddresses,
+        CancellationToken cancellationToken)
+    {
+        var pingTasks = ipAddresses
+            .Select(async ipAddress => new KeyValuePair<string, bool>(
+                ipAddress,
+                await PingIpAddressAsync(ipAddress, cancellationToken)))
+            .ToArray();
+
+        var results = await Task.WhenAll(pingTasks);
+        return results.ToDictionary(result => result.Key, result => result.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static async Task<bool> PingIpAddressAsync(string ipAddress, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var ping = new Ping();
+            var reply = await ping.SendPingAsync(IPAddress.Parse(ipAddress), 1000).WaitAsync(cancellationToken);
+            return reply.Status == IPStatus.Success;
+        }
+        catch when (!cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+    }
+
+    private void ApplyDefaultServerCheckResult(
+        DefaultServerEndpoint server,
+        IReadOnlyList<string> ipAddresses,
+        IReadOnlyDictionary<string, NetworkDevice> devicesByIp,
+        IReadOnlyDictionary<string, bool> pingResults)
+    {
+        var devices = ipAddresses
+            .Select(ipAddress => devicesByIp.TryGetValue(ipAddress, out var device)
+                ? device
+                : CreateUnavailableDefaultServerDevice(ipAddress))
+            .OrderBy(device => NetworkScanner.ToSortableUInt32(IPAddress.Parse(device.IpAddress)))
+            .ToList();
+
+        var serverPingResults = ipAddresses.ToDictionary(
+            ipAddress => ipAddress,
+            ipAddress => pingResults.TryGetValue(ipAddress, out var isOnline) && isOnline,
+            StringComparer.OrdinalIgnoreCase);
+
+        var pingCount = serverPingResults.Count(pair => pair.Value);
+        var certificateCount = devices.Count(device => device.RdpCertificateResponded);
+        var rdpOpenCount = devices.Count(device => device.IsOnline);
+
+        server.LastDevices = devices;
+        server.LastPingResults = serverPingResults;
+        server.IsOnline = devices.Any(device =>
+            device.IsOnline
+            && serverPingResults.TryGetValue(device.IpAddress, out var pingOk)
+            && pingOk);
+        server.CheckedAt = DateTime.Now;
+        server.PingStatus = $"{pingCount}/{ipAddresses.Count} OK";
+        server.RdpStatus = certificateCount > 0
+            ? $"{certificateCount}/{ipAddresses.Count} сертификат"
+            : rdpOpenCount > 0
+                ? $"{rdpOpenCount}/{ipAddresses.Count} 3389 открыт"
+                : "3389 закрыт";
+        server.DetectedNames = FormatDefaultServerNames(devices);
+        server.MacAddresses = FormatDefaultServerMacs(devices);
+        server.OpenPorts = FormatDefaultServerPorts(devices);
+        server.Details = string.Join(Environment.NewLine, devices.Select(device => FormatDefaultServerIpLog(server, device)));
+    }
+
+    private static NetworkDevice CreateUnavailableDefaultServerDevice(string ipAddress)
+    {
+        return new NetworkDevice
+        {
+            IpAddress = ipAddress,
+            HostName = NetworkDevice.UnknownHostName,
+            IsServer = true,
+            IsOnline = false,
+            CheckedAt = DateTime.Now,
+            Source = "Проверка серверов"
+        };
+    }
+
+    private static void MarkDefaultServerInvalid(DefaultServerEndpoint server, string details)
+    {
+        server.IsOnline = false;
+        server.PingStatus = "Не проверено";
+        server.RdpStatus = "Не проверено";
+        server.DetectedNames = "";
+        server.MacAddresses = "";
+        server.OpenPorts = "";
+        server.CheckedAt = DateTime.Now;
+        server.Details = details;
+        server.LastDevices = [];
+        server.LastPingResults = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void AddDefaultServerCheckDetailsToEventLog(DefaultServerEndpoint server)
+    {
+        AddEventLog($"Проверка {server.Name}:");
+
+        if (server.LastDevices.Count == 0)
+        {
+            AddEventLog($"{server.Name}: {server.Details}");
+            return;
+        }
+
+        foreach (var device in server.LastDevices)
+        {
+            AddEventLog(FormatDefaultServerIpLog(server, device));
+        }
+    }
+
+    private static string FormatDefaultServerIpLog(DefaultServerEndpoint server, NetworkDevice device)
+    {
+        var pingOk = server.LastPingResults.TryGetValue(device.IpAddress, out var isPingOnline) && isPingOnline;
+        var status = device.IsOnline && pingOk ? "В сети" : "Недоступен";
+        var pingText = pingOk ? "ping OK" : "ping нет";
+        var certificateText = device.RdpCertificateResponded
+            ? string.IsNullOrWhiteSpace(device.RdpCertificateName)
+                ? "сертификат получен"
+                : $"сертификат: {device.RdpCertificateName}"
+            : "сертификат не получен";
+        var ports = string.IsNullOrWhiteSpace(device.OpenPorts)
+            ? "открытых портов нет"
+            : $"порты: {device.OpenPorts}";
+
+        return $"{device.IpAddress}: {status}, {pingText}, {certificateText}, {ports}";
+    }
+
+    private static string FormatDefaultServerNames(IEnumerable<NetworkDevice> devices)
+    {
+        var names = devices
+            .SelectMany(device => new[] { device.RdpCertificateName, device.HostName })
+            .Where(NetworkDevice.IsKnownHostName)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return string.Join("; ", names);
+    }
+
+    private static string FormatDefaultServerMacs(IEnumerable<NetworkDevice> devices)
+    {
+        return string.Join("; ", devices
+            .Select(device => device.MacAddress)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static string FormatDefaultServerPorts(IEnumerable<NetworkDevice> devices)
+    {
+        var ports = devices
+            .SelectMany(device => device.OpenPorts.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .Select(value => int.TryParse(value, out var port) ? port : 0)
+            .Where(port => port > 0)
+            .Distinct()
+            .OrderBy(port => port)
+            .ToList();
+
+        return string.Join(", ", ports);
+    }
+
+    private bool EditDefaultServer(DefaultServerEndpoint server, string title)
+    {
+        using var dialog = new Form
+        {
+            AutoScaleMode = AutoScaleMode.Font,
+            ClientSize = new Size(540, 170),
+            Font = Font,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.CenterParent,
+            Text = title
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12)
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var nameLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 6, 8, 6),
+            Text = "Название:"
+        };
+        var nameBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 3, 0, 3),
+            Text = server.Name
+        };
+
+        var addressLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 6, 8, 6),
+            Text = "IP-адреса:"
+        };
+        var addressBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 3, 0, 3),
+            Text = server.Address
+        };
+
+        var buttonsPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            Margin = new Padding(0, 12, 0, 0)
+        };
+
+        var saveButton = new Button
+        {
+            AutoSize = true,
+            Text = "Сохранить",
+            UseVisualStyleBackColor = true
+        };
+        var cancelButton = new Button
+        {
+            AutoSize = true,
+            DialogResult = DialogResult.Cancel,
+            Text = "Отмена",
+            UseVisualStyleBackColor = true
+        };
+
+        saveButton.Click += (_, _) =>
+        {
+            var updatedName = nameBox.Text.Trim();
+            if (string.IsNullOrWhiteSpace(updatedName))
+            {
+                MessageBox.Show("Введите название сервера.", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                nameBox.Focus();
+                return;
+            }
+
+            if (HasDefaultServerName(updatedName, server))
+            {
+                MessageBox.Show("Сервер с таким названием уже есть в списке.", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                nameBox.Focus();
+                return;
+            }
+
+            if (!TryParseIpAddressList(addressBox.Text, out var updatedIpAddresses, out var invalidValue))
+            {
+                MessageBox.Show($"Некорректный IPv4-адрес: {invalidValue}", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                addressBox.Focus();
+                return;
+            }
+
+            if (updatedIpAddresses.Count == 0)
+            {
+                MessageBox.Show("Введите хотя бы один IPv4-адрес.", dialog.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                addressBox.Focus();
+                return;
+            }
+
+            server.Name = updatedName;
+            server.Address = string.Join("; ", updatedIpAddresses);
+            MarkDefaultServerInvalid(server, "Не проверено");
+            server.CheckedAt = null;
+            dialog.DialogResult = DialogResult.OK;
+            dialog.Close();
+        };
+
+        buttonsPanel.Controls.Add(saveButton);
+        buttonsPanel.Controls.Add(cancelButton);
+
+        layout.Controls.Add(nameLabel, 0, 0);
+        layout.Controls.Add(nameBox, 1, 0);
+        layout.Controls.Add(addressLabel, 0, 1);
+        layout.Controls.Add(addressBox, 1, 1);
+        layout.Controls.Add(buttonsPanel, 0, 3);
+        layout.SetColumnSpan(buttonsPanel, 2);
+
+        dialog.AcceptButton = saveButton;
+        dialog.CancelButton = cancelButton;
+        dialog.Controls.Add(layout);
+
+        return dialog.ShowDialog(this) == DialogResult.OK;
     }
 
     private Control BuildServicesLayout()
@@ -949,13 +1559,16 @@ public partial class Form1 : Form
 
     private static string FormatDeviceCheckLog(NetworkDevice device)
     {
+        var ports = string.IsNullOrWhiteSpace(device.OpenPorts)
+            ? "открытых портов нет"
+            : $"порты: {device.OpenPorts}";
+
         if (!device.IsOnline)
         {
-            return $"{device.IpAddress}: Недоступен, открытых портов нет";
+            return $"{device.IpAddress}: Недоступен, {ports}";
         }
 
-        var ports = string.IsNullOrWhiteSpace(device.OpenPorts) ? "нет данных" : device.OpenPorts;
-        return $"{device.IpAddress}: В сети, порты: {ports}";
+        return $"{device.IpAddress}: В сети, {ports}";
     }
 
     private bool IsKnownServerIp(string ipAddress)
@@ -966,8 +1579,9 @@ public partial class Form1 : Form
 
     private async Task RunServerScanAsync(string reason)
     {
-        if (_scanInProgress)
+        if (_scanInProgress || _defaultServerCheckInProgress)
         {
+            statusLabel.Text = "Другая сетевая проверка уже выполняется.";
             return;
         }
 
@@ -1024,8 +1638,9 @@ public partial class Form1 : Form
 
     private async Task RunNetworkScanAsync(string reason)
     {
-        if (_scanInProgress)
+        if (_scanInProgress || _defaultServerCheckInProgress)
         {
+            statusLabel.Text = "Другая сетевая проверка уже выполняется.";
             return;
         }
 
@@ -1488,6 +2103,111 @@ public partial class Form1 : Form
 
         CopyGridSelection(grid);
         e.Handled = true;
+    }
+
+    private async void checkDefaultServersButton_Click(object? sender, EventArgs e)
+    {
+        await RunDefaultServerChecksAsync(_defaultServers, "Ручная проверка серверов");
+    }
+
+    private void defaultServersGrid_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right)
+        {
+            return;
+        }
+
+        SelectGridCellAtMouse(defaultServersGrid, e);
+    }
+
+    private async void defaultServersGrid_CellDoubleClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0 || defaultServersGrid.Rows[e.RowIndex].Tag is not DefaultServerEndpoint server)
+        {
+            return;
+        }
+
+        await RunDefaultServerChecksAsync([server], $"Ручная проверка сервера {server.Name}");
+    }
+
+    private void addDefaultServerMenuItem_Click(object? sender, EventArgs e)
+    {
+        var server = new DefaultServerEndpoint
+        {
+            Name = "",
+            Address = ""
+        };
+
+        if (!EditDefaultServer(server, "Добавить сервер"))
+        {
+            return;
+        }
+
+        _defaultServers.Add(server);
+        SaveDefaultServers();
+        RenderDefaultServers();
+        SelectDefaultServerRow(server);
+        AddEventLog($"Сервер добавлен: {server.Name} ({server.Address}).");
+        statusLabel.Text = $"Сервер добавлен: {server.Name}.";
+    }
+
+    private void editDefaultServerMenuItem_Click(object? sender, EventArgs e)
+    {
+        var server = GetSelectedDefaultServer();
+        if (server is null)
+        {
+            return;
+        }
+
+        var oldName = server.Name;
+        if (!EditDefaultServer(server, "Редактировать сервер"))
+        {
+            return;
+        }
+
+        SaveDefaultServers();
+        RenderDefaultServers();
+        SelectDefaultServerRow(server);
+        AddEventLog($"Сервер изменен: {oldName} -> {server.Name} ({server.Address}).");
+        statusLabel.Text = $"Сервер изменен: {server.Name}.";
+    }
+
+    private void deleteDefaultServerMenuItem_Click(object? sender, EventArgs e)
+    {
+        var server = GetSelectedDefaultServer();
+        if (server is null)
+        {
+            return;
+        }
+
+        var result = MessageBox.Show(
+            $"Удалить сервер \"{server.Name}\"?",
+            Text,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        _defaultServers.Remove(server);
+        SaveDefaultServers();
+        RenderDefaultServers();
+        AddEventLog($"Сервер удален: {server.Name}.");
+        statusLabel.Text = $"Сервер удален: {server.Name}.";
+    }
+
+    private async void checkDefaultServerMenuItem_Click(object? sender, EventArgs e)
+    {
+        var server = GetSelectedDefaultServer();
+        if (server is null)
+        {
+            return;
+        }
+
+        await RunDefaultServerChecksAsync([server], $"Ручная проверка сервера {server.Name}");
     }
 
     private async void checkServicesButton_Click(object? sender, EventArgs e)

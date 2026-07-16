@@ -1,8 +1,11 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Security;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
 
 namespace NetworkMonitor;
@@ -10,13 +13,38 @@ namespace NetworkMonitor;
 internal sealed partial class NetworkScanner
 {
     private const int PortTimeoutMilliseconds = 300;
+    private const int RdpPortTimeoutMilliseconds = 1000;
+    private const int PingNameTimeoutMilliseconds = 3000;
     private const int NameQueryTimeoutMilliseconds = 1000;
+    private const int NbtStatTimeoutMilliseconds = 3000;
+    private const int RdpCertificateTimeoutMilliseconds = 4000;
     private const int MaxAddressProbeParallelism = 32;
     private const int MaxEnrichmentParallelism = 48;
     private const int MaxSubnetAddresses = 1024;
+    private const int RdpPort = 3389;
+    private const uint RdpProtocolSsl = 0x00000001;
+    private const uint RdpProtocolHybrid = 0x00000002;
+    private const uint RdpProtocolHybridEx = 0x00000008;
+    private const uint RdpRequestedProtocols = RdpProtocolSsl | RdpProtocolHybrid | RdpProtocolHybridEx;
 
-    private static readonly int[] ServerPorts = [22, 25, 53, 80, 110, 143, 389, 443, 465, 587, 636, 993, 995, 1433, 1521, 3306, 3389, 5432, 8080, 8443];
+    private static readonly int[] ServerPorts = [22, 25, 53, 80, 110, 143, 389, 443, 465, 587, 636, 993, 995, 1433, 1521, 3306, RdpPort, 5432, 8080, 8443];
+    private static readonly int[] ServerIdentityPorts = [25, 53, 110, 143, 389, 465, 587, 636, 993, 995, 1433, 1521, 3306, 5432];
     private static readonly string[] ServerNameTokens = ["server", "srv", "dc", "sql", "db", "1c", "ksc", "mail", "exchange", "nas", "storage", "backup", "terminal", "rdp", "web", "app"];
+    private static readonly byte[] RdpTlsNegotiationRequest =
+    [
+        0x03, 0x00, 0x00, 0x13,
+        0x0e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x08, 0x00,
+        (byte)(RdpRequestedProtocols & 0xFF),
+        (byte)((RdpRequestedProtocols >> 8) & 0xFF),
+        (byte)((RdpRequestedProtocols >> 16) & 0xFF),
+        (byte)((RdpRequestedProtocols >> 24) & 0xFF)
+    ];
+
+    private readonly record struct RdpCertificateResult(bool Responded, string HostName)
+    {
+        public static RdpCertificateResult Empty { get; } = new(false, "");
+    }
 
     public async Task<NetworkScanResult> ScanLocalNetworksAsync(
         IEnumerable<string> manualIpAddresses,
@@ -72,8 +100,11 @@ internal sealed partial class NetworkScanner
                 progress?.Report(new ScanProgress($"Проверено IP: {completed} из {scanTargets.Count}", completed, scanTargets.Count));
             });
 
+        var deviceList = devices.ToList();
+        await FillMissingMacAddressesAsync(deviceList, cancellationToken);
+
         return new NetworkScanResult(
-            devices.OrderByDescending(device => device.IsServer).ThenBy(device => ToSortableUInt32(IPAddress.Parse(device.IpAddress))).ToList(),
+            deviceList.OrderByDescending(device => device.IsServer).ThenBy(device => ToSortableUInt32(IPAddress.Parse(device.IpAddress))).ToList(),
             scannedAddressSet,
             manualAddressSet,
             DateTime.Now);
@@ -123,8 +154,11 @@ internal sealed partial class NetworkScanner
                 progress?.Report(new ScanProgress($"Проверено {label}: {completed} из {scanTargets.Count}", completed, scanTargets.Count));
             });
 
+        var deviceList = devices.ToList();
+        await FillMissingMacAddressesAsync(deviceList, cancellationToken);
+
         return new NetworkScanResult(
-            devices.OrderByDescending(device => device.IsServer).ThenBy(device => ToSortableUInt32(IPAddress.Parse(device.IpAddress))).ToList(),
+            deviceList.OrderByDescending(device => device.IsServer).ThenBy(device => ToSortableUInt32(IPAddress.Parse(device.IpAddress))).ToList(),
             scannedAddressSet,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase),
             DateTime.Now);
@@ -143,6 +177,7 @@ internal sealed partial class NetworkScanner
     {
         var arpCache = await ReadArpCacheAsync(cancellationToken);
         var device = await BuildCheckedDeviceAsync(address, source, arpCache, cancellationToken);
+        await FillMissingMacAddressesAsync([device], cancellationToken);
         if (requireServerNameResponse)
         {
             device.IsServer = true;
@@ -189,7 +224,16 @@ internal sealed partial class NetworkScanner
         IReadOnlyList<int>? checkedOpenPorts = null)
     {
         var openPorts = checkedOpenPorts ?? await FindOpenServerPortsAsync(address, cancellationToken);
-        var directHostName = await QueryNetBiosNameAsync(address, cancellationToken);
+        var rdpCertificate = openPorts.Contains(RdpPort)
+            ? await QueryRdpCertificateAsync(address, cancellationToken)
+            : RdpCertificateResult.Empty;
+        var rdpCertificateName = rdpCertificate.HostName;
+        var directHostName = rdpCertificateName;
+        if (string.IsNullOrWhiteSpace(directHostName))
+        {
+            directHostName = await QueryNetBiosNameAsync(address, cancellationToken);
+        }
+
         var hostName = !string.IsNullOrWhiteSpace(directHostName)
             ? directHostName
             : await ResolveHostNameAsync(address, cancellationToken);
@@ -197,7 +241,7 @@ internal sealed partial class NetworkScanner
         var isServer = LooksLikeServer(hostName, openPorts);
         var ipText = address.ToString();
         var nameResponded = !string.IsNullOrWhiteSpace(directHostName);
-        var isOnline = openPorts.Count > 0;
+        var isOnline = openPorts.Contains(RdpPort);
 
         return new NetworkDevice
         {
@@ -207,8 +251,14 @@ internal sealed partial class NetworkScanner
             IsOnline = isOnline,
             IsServer = isServer,
             NameResponded = nameResponded,
+            RdpCertificateResponded = rdpCertificate.Responded,
+            RdpCertificateName = rdpCertificateName,
             CheckedAt = DateTime.Now,
-            Source = isOnline ? source : $"{source} (нет открытых портов)",
+            Source = isOnline
+                ? source
+                : openPorts.Count == 0
+                    ? $"{source} (нет открытых портов)"
+                    : $"{source} (порт 3389 закрыт)",
             OpenPorts = openPorts.Count == 0 ? "" : string.Join(", ", openPorts)
         };
     }
@@ -239,7 +289,475 @@ internal sealed partial class NetworkScanner
         return firstDot > 0 ? hostName[..firstDot] : hostName;
     }
 
+    private static async Task<RdpCertificateResult> QueryRdpCertificateAsync(IPAddress address, CancellationToken cancellationToken)
+    {
+        TcpClient? client = null;
+        X509Certificate2? remoteCertificate = null;
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(RdpCertificateTimeoutMilliseconds);
+            using var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+
+            client = new TcpClient(address.AddressFamily);
+            var connectTask = client.ConnectAsync(address, RdpPort);
+            var completedTask = await Task.WhenAny(connectTask, Task.Delay(RdpCertificateTimeoutMilliseconds, linkedToken.Token));
+            if (completedTask != connectTask)
+            {
+                return RdpCertificateResult.Empty;
+            }
+
+            await connectTask;
+
+            var stream = client.GetStream();
+            await stream.WriteAsync(RdpTlsNegotiationRequest, linkedToken.Token);
+            await stream.FlushAsync(linkedToken.Token);
+
+            var negotiationResponse = await ReadRdpNegotiationResponseAsync(stream, linkedToken.Token);
+            if (negotiationResponse is null || !IsRdpTlsNegotiationAccepted(negotiationResponse))
+            {
+                return RdpCertificateResult.Empty;
+            }
+
+            using var sslStream = new SslStream(
+                stream,
+                leaveInnerStreamOpen: false,
+                (_, certificate, _, _) =>
+                {
+                    if (certificate is not null)
+                    {
+                        remoteCertificate = new X509Certificate2(certificate);
+                    }
+
+                    return true;
+                });
+
+            var options = new SslClientAuthenticationOptions
+            {
+                TargetHost = address.ToString(),
+                EnabledSslProtocols = SslProtocols.None,
+                CertificateRevocationCheckMode = X509RevocationMode.NoCheck
+            };
+
+            await sslStream.AuthenticateAsClientAsync(options, linkedToken.Token);
+
+            if (remoteCertificate is null && sslStream.RemoteCertificate is not null)
+            {
+                remoteCertificate = new X509Certificate2(sslStream.RemoteCertificate);
+            }
+
+            if (remoteCertificate is null)
+            {
+                return RdpCertificateResult.Empty;
+            }
+
+            using (remoteCertificate)
+            {
+                return new RdpCertificateResult(true, ExtractCertificateHostName(remoteCertificate));
+            }
+        }
+        catch
+        {
+            remoteCertificate?.Dispose();
+            return RdpCertificateResult.Empty;
+        }
+        finally
+        {
+            client?.Dispose();
+        }
+    }
+
+    private static async Task<byte[]?> ReadRdpNegotiationResponseAsync(NetworkStream stream, CancellationToken cancellationToken)
+    {
+        var header = await ReadExactAsync(stream, 4, cancellationToken);
+        if (header is null || header[0] != 0x03)
+        {
+            return null;
+        }
+
+        var packetLength = (header[2] << 8) | header[3];
+        if (packetLength < 4 || packetLength > 4096)
+        {
+            return null;
+        }
+
+        var response = new byte[packetLength];
+        Buffer.BlockCopy(header, 0, response, 0, header.Length);
+
+        var body = await ReadExactAsync(stream, packetLength - header.Length, cancellationToken);
+        if (body is null)
+        {
+            return null;
+        }
+
+        Buffer.BlockCopy(body, 0, response, header.Length, body.Length);
+        return response;
+    }
+
+    private static async Task<byte[]?> ReadExactAsync(NetworkStream stream, int byteCount, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[byteCount];
+        var offset = 0;
+
+        while (offset < byteCount)
+        {
+            var bytesRead = await stream.ReadAsync(buffer.AsMemory(offset, byteCount - offset), cancellationToken);
+            if (bytesRead == 0)
+            {
+                return null;
+            }
+
+            offset += bytesRead;
+        }
+
+        return buffer;
+    }
+
+    private static bool IsRdpTlsNegotiationAccepted(byte[] response)
+    {
+        for (var offset = 0; offset <= response.Length - 8; offset++)
+        {
+            var type = response[offset];
+            var structureLength = response[offset + 2] | (response[offset + 3] << 8);
+            if (structureLength != 8)
+            {
+                continue;
+            }
+
+            if (type == 0x03)
+            {
+                return false;
+            }
+
+            if (type != 0x02)
+            {
+                continue;
+            }
+
+            var selectedProtocol = (uint)(response[offset + 4]
+                | (response[offset + 5] << 8)
+                | (response[offset + 6] << 16)
+                | (response[offset + 7] << 24));
+
+            return (selectedProtocol & RdpRequestedProtocols) != 0;
+        }
+
+        return false;
+    }
+
+    private static string ExtractCertificateHostName(X509Certificate2 certificate)
+    {
+        var dnsName = NormalizeCertificateHostName(certificate.GetNameInfo(X509NameType.DnsName, forIssuer: false));
+        if (!string.IsNullOrWhiteSpace(dnsName))
+        {
+            return dnsName;
+        }
+
+        var simpleName = NormalizeCertificateHostName(certificate.GetNameInfo(X509NameType.SimpleName, forIssuer: false));
+        if (!string.IsNullOrWhiteSpace(simpleName))
+        {
+            return simpleName;
+        }
+
+        var commonNameMatch = Regex.Match(certificate.Subject, @"(?:^|,\s*)CN\s*=\s*(?<name>[^,]+)", RegexOptions.IgnoreCase);
+        return commonNameMatch.Success
+            ? NormalizeCertificateHostName(commonNameMatch.Groups["name"].Value)
+            : "";
+    }
+
+    private static string NormalizeCertificateHostName(string value)
+    {
+        var name = value.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return "";
+        }
+
+        if (name.StartsWith("CN=", StringComparison.OrdinalIgnoreCase))
+        {
+            name = name[3..].Trim();
+        }
+
+        if (name.StartsWith("TERMSRV/", StringComparison.OrdinalIgnoreCase))
+        {
+            name = name["TERMSRV/".Length..].Trim();
+        }
+
+        if (name.StartsWith("*.", StringComparison.OrdinalIgnoreCase))
+        {
+            name = name[2..].Trim();
+        }
+
+        if (IPAddress.TryParse(name, out _))
+        {
+            return "";
+        }
+
+        var hostName = SimplifyHostName(name);
+        return hostName == NetworkDevice.UnknownHostName ? "" : hostName;
+    }
+
     private static async Task<string> QueryNetBiosNameAsync(IPAddress address, CancellationToken cancellationToken)
+    {
+        var pingName = await QueryPingNameAsync(address, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(pingName))
+        {
+            return pingName;
+        }
+
+        var nbtStatName = await QueryNbtStatNameAsync(address, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(nbtStatName))
+        {
+            return nbtStatName;
+        }
+
+        return await QueryBuiltInNetBiosNameAsync(address, cancellationToken);
+    }
+
+    private static async Task<string> QueryPingNameAsync(IPAddress address, CancellationToken cancellationToken)
+    {
+        Process? process = null;
+
+        try
+        {
+            process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "ping.exe",
+                    Arguments = $"-a -n 1 -w 1000 {address}",
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }
+            };
+
+            if (!process.Start())
+            {
+                return "";
+            }
+
+            using var timeout = new CancellationTokenSource(PingNameTimeoutMilliseconds);
+            using var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+            var outputTask = process.StandardOutput.ReadToEndAsync(linkedToken.Token);
+            var errorTask = process.StandardError.ReadToEndAsync(linkedToken.Token);
+
+            await process.WaitForExitAsync(linkedToken.Token);
+
+            var output = await outputTask;
+            var error = await errorTask;
+            return ParsePingNameOutput($"{output}{Environment.NewLine}{error}", address);
+        }
+        catch
+        {
+            TryKillProcess(process);
+            return "";
+        }
+        finally
+        {
+            process?.Dispose();
+        }
+    }
+
+    private static string ParsePingNameOutput(string output, IPAddress address)
+    {
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return "";
+        }
+
+        var escapedAddress = Regex.Escape(address.ToString());
+        var namedPingMatch = Regex.Match(
+            output,
+            $@"(?im)^\s*(?:Pinging|Обмен пакетами с)\s+(?<name>[^\[\r\n]+?)\s*\[{escapedAddress}\]",
+            RegexOptions.CultureInvariant);
+        if (namedPingMatch.Success)
+        {
+            var hostName = NormalizePingHostName(namedPingMatch.Groups["name"].Value, address);
+            if (!string.IsNullOrWhiteSpace(hostName))
+            {
+                return hostName;
+            }
+        }
+
+        var addressMarker = $"[{address}]";
+        foreach (var rawLine in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var markerIndex = rawLine.IndexOf(addressMarker, StringComparison.OrdinalIgnoreCase);
+            if (markerIndex <= 0)
+            {
+                continue;
+            }
+
+            var prefix = rawLine[..markerIndex].Trim();
+            var name = prefix
+                .Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries)
+                .LastOrDefault();
+
+            name = NormalizePingHostName(name ?? "", address);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            return name;
+        }
+
+        return "";
+    }
+
+    private static string NormalizePingHostName(string value, IPAddress address)
+    {
+        var name = value.Trim().TrimEnd(':', '.');
+        if (string.IsNullOrWhiteSpace(name) || name.Equals(address.ToString(), StringComparison.OrdinalIgnoreCase))
+        {
+            return "";
+        }
+
+        var hostName = SimplifyHostName(name);
+        return hostName == NetworkDevice.UnknownHostName ? "" : hostName;
+    }
+
+    private static async Task<string> QueryNbtStatNameAsync(IPAddress address, CancellationToken cancellationToken)
+    {
+        Process? process = null;
+
+        try
+        {
+            process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "nbtstat.exe",
+                    Arguments = $"-A {address}",
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }
+            };
+
+            if (!process.Start())
+            {
+                return "";
+            }
+
+            using var timeout = new CancellationTokenSource(NbtStatTimeoutMilliseconds);
+            using var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+            var outputTask = process.StandardOutput.ReadToEndAsync(linkedToken.Token);
+            var errorTask = process.StandardError.ReadToEndAsync(linkedToken.Token);
+
+            await process.WaitForExitAsync(linkedToken.Token);
+
+            var output = await outputTask;
+            var error = await errorTask;
+            return ParseNbtStatOutput($"{output}{Environment.NewLine}{error}");
+        }
+        catch
+        {
+            TryKillProcess(process);
+            return "";
+        }
+        finally
+        {
+            process?.Dispose();
+        }
+    }
+
+    private static string ParseNbtStatOutput(string output)
+    {
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return "";
+        }
+
+        var serverName = "";
+        var workstationName = "";
+        var fallbackName = "";
+
+        foreach (var rawLine in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!TryReadNbtStatName(rawLine, out var name, out var suffix, out var isGroupName))
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(fallbackName))
+            {
+                fallbackName = name;
+            }
+
+            if (isGroupName)
+            {
+                continue;
+            }
+
+            if (suffix.Equals("20", StringComparison.OrdinalIgnoreCase))
+            {
+                serverName = name;
+            }
+            else if (suffix.Equals("00", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(workstationName))
+            {
+                workstationName = name;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(serverName))
+        {
+            return serverName;
+        }
+
+        return !string.IsNullOrWhiteSpace(workstationName) ? workstationName : fallbackName;
+    }
+
+    private static bool TryReadNbtStatName(string line, out string name, out string suffix, out bool isGroupName)
+    {
+        name = "";
+        suffix = "";
+        isGroupName = false;
+
+        var suffixStart = line.IndexOf('<');
+        var suffixEnd = suffixStart >= 0 ? line.IndexOf('>', suffixStart + 1) : -1;
+        if (suffixStart <= 0 || suffixEnd <= suffixStart + 1)
+        {
+            return false;
+        }
+
+        suffix = line.Substring(suffixStart + 1, suffixEnd - suffixStart - 1).Trim();
+        if (suffix.Length != 2 || suffix.Any(character => !Uri.IsHexDigit(character)))
+        {
+            return false;
+        }
+
+        name = line[..suffixStart].Trim();
+        if (string.IsNullOrWhiteSpace(name) || name.Equals("__MSBROWSE__", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        isGroupName = line.Contains("GROUP", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("ГРУП", StringComparison.OrdinalIgnoreCase);
+
+        return true;
+    }
+
+    private static void TryKillProcess(Process? process)
+    {
+        try
+        {
+            if (process is not null && !process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Ignore cleanup failures after a timeout or cancelled name lookup.
+        }
+    }
+
+    private static async Task<string> QueryBuiltInNetBiosNameAsync(IPAddress address, CancellationToken cancellationToken)
     {
         try
         {
@@ -411,7 +929,8 @@ internal sealed partial class NetworkScanner
         {
             using var client = new TcpClient(address.AddressFamily);
             var connectTask = client.ConnectAsync(address, port);
-            var timeoutTask = Task.Delay(PortTimeoutMilliseconds, cancellationToken);
+            var timeoutMilliseconds = port == RdpPort ? RdpPortTimeoutMilliseconds : PortTimeoutMilliseconds;
+            var timeoutTask = Task.Delay(timeoutMilliseconds, cancellationToken);
             var completedTask = await Task.WhenAny(connectTask, timeoutTask);
 
             if (completedTask != connectTask)
@@ -430,18 +949,13 @@ internal sealed partial class NetworkScanner
 
     private static bool LooksLikeServer(string hostName, IReadOnlyCollection<int> openPorts)
     {
-        if (openPorts.Count > 0)
-        {
-            return true;
-        }
-
         var normalizedName = hostName.ToLowerInvariant();
         if (ServerNameTokens.Any(token => normalizedName.Contains(token, StringComparison.OrdinalIgnoreCase)))
         {
             return true;
         }
 
-        return openPorts.Any(port => port is 22 or 25 or 53 or 80 or 389 or 443 or 636 or 1433 or 1521 or 3306 or 3389 or 5432 or 8080 or 8443);
+        return openPorts.Any(port => ServerIdentityPorts.Contains(port));
     }
 
     private static List<IPAddress> DiscoverLocalScanTargets()
@@ -520,6 +1034,26 @@ internal sealed partial class NetworkScanner
             (byte)((value >> 8) & 0xFF),
             (byte)(value & 0xFF)
         ]);
+    }
+
+    private static async Task FillMissingMacAddressesAsync(IEnumerable<NetworkDevice> devices, CancellationToken cancellationToken)
+    {
+        var missingDevices = devices
+            .Where(device => string.IsNullOrWhiteSpace(device.MacAddress))
+            .ToList();
+        if (missingDevices.Count == 0)
+        {
+            return;
+        }
+
+        var refreshedArpCache = await ReadArpCacheAsync(cancellationToken);
+        foreach (var device in missingDevices)
+        {
+            if (refreshedArpCache.TryGetValue(device.IpAddress, out var macAddress))
+            {
+                device.MacAddress = macAddress;
+            }
+        }
     }
 
     private static async Task<IReadOnlyDictionary<string, string>> ReadArpCacheAsync(CancellationToken cancellationToken)
