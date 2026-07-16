@@ -4,7 +4,23 @@
 
 ### Назначение
 
-Network Monitor - Windows-приложение для контроля доступности устройств в локальной IPv4-сети. Программа автоматически проверяет известные серверы каждые 10 минут, показывает найденные устройства в таблице, выделяет вероятные серверы и позволяет вручную добавить или проверить конкретный IP-адрес. Полное сканирование всей сети запускается только вручную, чтобы снизить нагрузку на сеть.
+Network Monitor - Windows-приложение для контроля доступности устройств в локальной IPv4-сети. Программа автоматически проверяет серверы из отдельного файла `default_servers.json` каждые 10 минут, показывает найденные устройства в таблице, выделяет вероятные серверы и позволяет вручную добавить или проверить конкретный IP-адрес. Полное сканирование всей сети запускается только вручную, чтобы снизить нагрузку на сеть.
+
+### Вкладка `Сервера`
+
+Вкладка `Сервера` расположена первой и открывается сразу при запуске приложения. Она предназначена для фиксированного списка важных серверов, который не зависит от результатов сканирования сети.
+
+При первом запуске приложение создает файл:
+
+```text
+%AppData%\NetworkMonitor\default_servers.json
+```
+
+В публичном репозитории список реальных серверов не хранится. Если рядом с приложением есть локальный `default_servers.json`, он используется как шаблон при первом запуске; если шаблона нет, пользователь заполняет список через контекстное меню вкладки.
+
+Этот файл не перезаписывается после сканирования сети и не пополняется автоматически. Его можно изменить только вручную в профиле пользователя или через контекстное меню вкладки `Сервера`: `Копировать`, `Добавить`, `Редактировать`, `Удалить`, `Проверить`.
+
+Проверка сервера выполняется по всем IP в строке. Для каждого IP приложение отправляет ICMP ping через `Ping.SendPingAsync` и пытается получить RDP-сертификат на TCP-порту `3389`. Строка считается `В сети`, если хотя бы один IP отвечает на ping и отдает сертификат `3389`. В журнал событий пишется подробный результат по каждому IP.
 
 ### Как работает проверка IP
 
@@ -20,11 +36,11 @@ Network Monitor - Windows-приложение для контроля дост�
 
 При сканировании приложение читает активные сетевые интерфейсы Windows через `NetworkInterface.GetAllNetworkInterfaces()`. Для каждого IPv4-адреса и маски вычисляется подсеть, после чего формируется список IP-адресов для проверки портов.
 
-Если подсеть слишком большая, приложение ограничивает перебор ближайшим `/24` диапазоном, чтобы не запускать слишком тяжелое сканирование. В таблицу автоматического сканирования попадают IP, у которых найден открытый проверяемый порт. Адреса, добавленные вручную, всегда проверяются и отображаются дополнительно, даже если открытых портов не найдено.
+Если подсеть слишком большая, приложение ограничивает перебор ближайшим `/24` диапазоном, чтобы не запускать слишком тяжелое сканирование. В таблицу результатов сканирования попадают IP, у которых найден открытый проверяемый порт. Адреса, добавленные вручную, всегда проверяются и отображаются дополнительно, даже если открытых портов не найдено.
 
 ### Автоматическое и ручное сканирование
 
-Автоматическая проверка запускается таймером WinForms каждые 10 минут, но проверяются только известные IP серверов. Список серверов пополняется после ручного полного сканирования сети и после ручной проверки IP, если устройство определено как сервер.
+Автоматическая проверка запускается таймером WinForms каждые 10 минут, но проверяются только серверы из вкладки `Сервера`. Сканирование всей сети по таймеру не запускается.
 
 Кнопка `Сканировать всю сеть` запускает полный обход локальной сети вручную. Во время проверки интерфейс не блокируется: проверка портов выполняется параллельно, до 32 IP одновременно.
 
@@ -36,7 +52,7 @@ Network Monitor - Windows-приложение для контроля дост�
 
 В нижней части окна есть `Журнал событий мониторинга`. В него пишутся запуск и завершение проверок, найденные серверы, ручные проверки, ошибки и изменения статуса устройств.
 
-При проверке выбранной строки таблицы журнал пишет подробный результат по каждому IP из этой строки. Формат: сначала `Проверка <имя>:`, затем отдельные строки вида `10.0.5.68: В сети, порты: 80, 389, 3389`, `192.170.1.7: Недоступен, порты: 80, 443` или `192.170.1.8: Недоступен, открытых портов нет`.
+При проверке выбранной строки таблицы журнал пишет подробный результат по каждому IP из этой строки. Формат: сначала `Проверка <имя>:`, затем отдельные строки вида `192.168.1.10: В сети, порты: 80, 389, 3389`, `192.168.1.11: Недоступен, порты: 80, 443` или `192.168.1.12: Недоступен, открытых портов нет`.
 
 ### Как определяется имя устройства
 
@@ -88,13 +104,32 @@ IP-адреса, добавленные вручную, хранятся в JSON
 
 При сохранении адреса нормализуются, дубликаты удаляются, список сортируется по IP.
 
-IP-адреса серверов, которые нужно проверять автоматически каждые 10 минут, хранятся отдельно:
+Фиксированный список серверов для первой вкладки и автоматической проверки хранится отдельно:
+
+```text
+%AppData%\NetworkMonitor\default_servers.json
+```
+
+Формат:
+
+```json
+[
+  {
+    "name": "SERVER-NAME",
+    "address": "192.168.1.10; 192.168.1.11"
+  }
+]
+```
+
+Сканирование сети не меняет этот файл. Приложение сохраняет его только после действий пользователя во вкладке `Сервера`: добавления, редактирования или удаления строки.
+
+IP-адреса серверов, которые были найдены или отмечены во вкладке `Сеть`, хранятся отдельно:
 
 ```text
 %AppData%\NetworkMonitor\server_ips.json
 ```
 
-Этот файл также содержит JSON-массив строк. Он пополняется автоматически, когда приложение определяет устройство как сервер.
+Этот файл также содержит JSON-массив строк. Он может пополняться автоматически, когда вкладка `Сеть` определяет устройство как сервер, но он не перезаписывает `default_servers.json`.
 
 ### Проверка сервисов
 
@@ -186,7 +221,23 @@ dotnet run --project .\NetworkMonitor\NetworkMonitor.csproj
 
 ### Purpose
 
-Network Monitor is a Windows desktop application for checking device availability in a local IPv4 network. It automatically checks known servers every 10 minutes, displays discovered devices in a table, moves probable servers to the top, and allows users to add or check specific IP addresses manually. Full network scans are manual only to reduce network load.
+Network Monitor is a Windows desktop application for checking device availability in a local IPv4 network. It automatically checks servers from the separate `default_servers.json` file every 10 minutes, displays discovered devices in a table, moves probable servers to the top, and allows users to add or check specific IP addresses manually. Full network scans are manual only to reduce network load.
+
+### `Сервера` Tab
+
+The `Сервера` tab is placed first and opens when the application starts. It is intended for a fixed list of important servers that is independent from network scan results.
+
+On first run, the application creates:
+
+```text
+%AppData%\NetworkMonitor\default_servers.json
+```
+
+The public repository does not store the real server list. If a local `default_servers.json` file exists next to the application, it is used as the first-run template; otherwise, the user fills the list through the tab context menu.
+
+This file is not overwritten after network scans and is not populated automatically. It can be changed only manually in the user profile or through the `Сервера` tab context menu: `Копировать`, `Добавить`, `Редактировать`, `Удалить`, `Проверить`.
+
+Server checking is performed for every IP address in the row. For each IP, the application sends an ICMP ping through `Ping.SendPingAsync` and tries to read the RDP certificate on TCP port `3389`. A row is marked online when at least one IP replies to ping and provides a `3389` certificate. The event log records a detailed result for each IP address.
 
 ### How IP Checks Work
 
@@ -206,7 +257,7 @@ If a subnet is too large, enumeration is limited to the nearest `/24` range to a
 
 ### Automatic and Manual Scanning
 
-Automatic checking is started by a WinForms timer every 10 minutes, but only known server IP addresses are checked. The server list is populated after a manual full network scan and after a manual IP check when the device is detected as a server.
+Automatic checking is started by a WinForms timer every 10 minutes, but only servers from the `Сервера` tab are checked. Full network scans are never started by the timer.
 
 The `Сканировать всю сеть` button starts a full local network scan manually. The UI remains responsive because port checks run in parallel, up to 32 IP addresses at a time.
 
@@ -216,7 +267,7 @@ Right-clicking a row on the `Сеть` tab opens a context menu: `Копиров
 
 The lower part of the window contains the monitoring event log. It records scan starts and finishes, discovered servers, manual checks, errors, and device status changes.
 
-When a selected table row is checked, the event log records a detailed result for each IP address in that row. The format is `Проверка <name>:` followed by lines such as `10.0.5.68: В сети, порты: 80, 389, 3389`, `192.170.1.7: Недоступен, порты: 80, 443`, or `192.170.1.8: Недоступен, открытых портов нет`.
+When a selected table row is checked, the event log records a detailed result for each IP address in that row. The format is `Проверка <name>:` followed by lines such as `192.168.1.10: В сети, порты: 80, 389, 3389`, `192.168.1.11: Недоступен, порты: 80, 443`, or `192.168.1.12: Недоступен, открытых портов нет`.
 
 Table text can be copied like in regular Windows applications: Ctrl+C copies the selected row, and right-clicking a cell opens a `Копировать` item for that exact value.
 
@@ -270,13 +321,32 @@ The file contains a plain JSON string array:
 
 Before saving, addresses are normalized, duplicates are removed, and the list is sorted by IP.
 
-Server IP addresses used by the 10-minute automatic check are stored separately:
+The fixed server list for the first tab and the 10-minute automatic check is stored separately:
+
+```text
+%AppData%\NetworkMonitor\default_servers.json
+```
+
+Format:
+
+```json
+[
+  {
+    "name": "SERVER-NAME",
+    "address": "192.168.1.10; 192.168.1.11"
+  }
+]
+```
+
+Network scans do not change this file. The application saves it only after explicit user actions on the `Сервера` tab: add, edit, or delete.
+
+Server IP addresses found or marked on the `Сеть` tab are stored separately:
 
 ```text
 %AppData%\NetworkMonitor\server_ips.json
 ```
 
-This file is also a JSON string array. It is updated automatically when the application identifies a device as a server.
+This file is also a JSON string array. It may be updated automatically when the `Сеть` tab identifies a device as a server, but it does not overwrite `default_servers.json`.
 
 ### Service Checks
 

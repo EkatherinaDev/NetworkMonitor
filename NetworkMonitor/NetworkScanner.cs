@@ -41,6 +41,11 @@ internal sealed partial class NetworkScanner
         (byte)((RdpRequestedProtocols >> 24) & 0xFF)
     ];
 
+    private readonly record struct RdpCertificateResult(bool Responded, string HostName)
+    {
+        public static RdpCertificateResult Empty { get; } = new(false, "");
+    }
+
     public async Task<NetworkScanResult> ScanLocalNetworksAsync(
         IEnumerable<string> manualIpAddresses,
         IProgress<ScanProgress>? progress,
@@ -219,9 +224,11 @@ internal sealed partial class NetworkScanner
         IReadOnlyList<int>? checkedOpenPorts = null)
     {
         var openPorts = checkedOpenPorts ?? await FindOpenServerPortsAsync(address, cancellationToken);
-        var directHostName = openPorts.Contains(RdpPort)
-            ? await QueryRdpCertificateNameAsync(address, cancellationToken)
-            : "";
+        var rdpCertificate = openPorts.Contains(RdpPort)
+            ? await QueryRdpCertificateAsync(address, cancellationToken)
+            : RdpCertificateResult.Empty;
+        var rdpCertificateName = rdpCertificate.HostName;
+        var directHostName = rdpCertificateName;
         if (string.IsNullOrWhiteSpace(directHostName))
         {
             directHostName = await QueryNetBiosNameAsync(address, cancellationToken);
@@ -244,6 +251,8 @@ internal sealed partial class NetworkScanner
             IsOnline = isOnline,
             IsServer = isServer,
             NameResponded = nameResponded,
+            RdpCertificateResponded = rdpCertificate.Responded,
+            RdpCertificateName = rdpCertificateName,
             CheckedAt = DateTime.Now,
             Source = isOnline
                 ? source
@@ -280,7 +289,7 @@ internal sealed partial class NetworkScanner
         return firstDot > 0 ? hostName[..firstDot] : hostName;
     }
 
-    private static async Task<string> QueryRdpCertificateNameAsync(IPAddress address, CancellationToken cancellationToken)
+    private static async Task<RdpCertificateResult> QueryRdpCertificateAsync(IPAddress address, CancellationToken cancellationToken)
     {
         TcpClient? client = null;
         X509Certificate2? remoteCertificate = null;
@@ -295,7 +304,7 @@ internal sealed partial class NetworkScanner
             var completedTask = await Task.WhenAny(connectTask, Task.Delay(RdpCertificateTimeoutMilliseconds, linkedToken.Token));
             if (completedTask != connectTask)
             {
-                return "";
+                return RdpCertificateResult.Empty;
             }
 
             await connectTask;
@@ -307,7 +316,7 @@ internal sealed partial class NetworkScanner
             var negotiationResponse = await ReadRdpNegotiationResponseAsync(stream, linkedToken.Token);
             if (negotiationResponse is null || !IsRdpTlsNegotiationAccepted(negotiationResponse))
             {
-                return "";
+                return RdpCertificateResult.Empty;
             }
 
             using var sslStream = new SslStream(
@@ -339,18 +348,18 @@ internal sealed partial class NetworkScanner
 
             if (remoteCertificate is null)
             {
-                return "";
+                return RdpCertificateResult.Empty;
             }
 
             using (remoteCertificate)
             {
-                return ExtractCertificateHostName(remoteCertificate);
+                return new RdpCertificateResult(true, ExtractCertificateHostName(remoteCertificate));
             }
         }
         catch
         {
             remoteCertificate?.Dispose();
-            return "";
+            return RdpCertificateResult.Empty;
         }
         finally
         {

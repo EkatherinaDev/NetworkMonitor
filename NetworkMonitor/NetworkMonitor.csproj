@@ -18,4 +18,12 @@
     <EmbeddedResource Include="default_services.json" LogicalName="NetworkMonitor.default_services.json" />
   </ItemGroup>
 
+  <ItemGroup Condition="Exists('default_servers.json')">
+    <None Update="default_servers.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <EmbeddedResource Include="default_servers.json" LogicalName="NetworkMonitor.default_servers.json" />
+  </ItemGroup>
+
 </Project>
