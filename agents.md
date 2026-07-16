@@ -39,7 +39,7 @@
 
 Вкладка `Сервера` должна быть первой в `TabControl` и открываться при запуске приложения. Она читает фиксированный список из `%AppData%\NetworkMonitor\default_servers.json`. Этот файл создается из `NetworkMonitor/default_servers.json` рядом с приложением, из embedded resource или как пустой список только если файла еще нет. Сканирование сети, автообнаружение и `server_ips.json` не должны изменять `default_servers.json`. Изменение этого файла допускается только вручную пользователем или через контекстное меню вкладки `Сервера`.
 
-Проверка на вкладке `Сервера` выполняется по всем IP в строке: ICMP ping через `Ping.SendPingAsync` и получение RDP-сертификата на TCP-порту `3389`. Строка считается `В сети`, если хотя бы один IP одновременно ответил на ping и отдал сертификат `3389`. В журнал нужно писать подробный результат по каждому IP.
+Проверка на вкладке `Сервера` выполняется по всем IP в строке: ICMP ping через `Ping.SendPingAsync`, проверка TCP-порта `3389` и попытка получить RDP-сертификат. Строка считается `В сети`, если хотя бы один IP одновременно ответил на ping и имеет открытый `3389`. Сертификат используется как дополнительная диагностика и источник имени; отсутствие сертификата само по себе не должно делать сервер недоступным. В журнал нужно писать подробный результат по каждому IP.
 
 `arp.exe -a` запускается только для чтения ARP-кэша и показа MAC-адресов. Не используйте ARP как критерий доступности устройства. ARP-кэш читается до и после проверки портов, чтобы заполнить MAC, появившийся после сетевого подключения; для IP за маршрутизатором реальный MAC удаленного сервера может быть недоступен.
 
@@ -221,7 +221,7 @@ For the `Сеть` tab, do not use ping as the availability criterion. Row statu
 
 The `Сервера` tab must be the first `TabControl` tab and open when the application starts. It reads the fixed list from `%AppData%\NetworkMonitor\default_servers.json`. This file is created from `NetworkMonitor/default_servers.json` next to the application, from the embedded resource, or as an empty list only when the user-profile file does not exist. Network scans, automatic discovery, and `server_ips.json` must not change `default_servers.json`. This file may be changed only manually by the user or through the `Сервера` tab context menu.
 
-Checks on the `Сервера` tab run for every IP address in a row: ICMP ping through `Ping.SendPingAsync` and RDP certificate retrieval on TCP port `3389`. A row is marked `В сети` only when at least one IP both replies to ping and provides a `3389` certificate. The event log should include a detailed result for every IP address.
+Checks on the `Сервера` tab run for every IP address in a row: ICMP ping through `Ping.SendPingAsync`, TCP port `3389` check, and an attempt to retrieve the RDP certificate. A row is marked `В сети` when at least one IP both replies to ping and has `3389` open. The certificate is used as extra diagnostics and a hostname source; failure to read it must not by itself make the server unavailable. The event log should include a detailed result for every IP address.
 
 `arp.exe -a` is launched only to read the Windows ARP cache and display MAC addresses. Do not use ARP as the source of truth for device availability. The ARP cache is read before and after port checks to fill MAC addresses that appear after network connections; for IP addresses behind a router, the remote server's real MAC address may not be available.
 

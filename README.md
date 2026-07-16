@@ -20,7 +20,7 @@ Network Monitor - Windows-приложение для контроля дост�
 
 Этот файл не перезаписывается после сканирования сети и не пополняется автоматически. Его можно изменить только вручную в профиле пользователя или через контекстное меню вкладки `Сервера`: `Копировать`, `Добавить`, `Редактировать`, `Удалить`, `Проверить`.
 
-Проверка сервера выполняется по всем IP в строке. Для каждого IP приложение отправляет ICMP ping через `Ping.SendPingAsync` и пытается получить RDP-сертификат на TCP-порту `3389`. Строка считается `В сети`, если хотя бы один IP отвечает на ping и отдает сертификат `3389`. В журнал событий пишется подробный результат по каждому IP.
+Проверка сервера выполняется по всем IP в строке. Для каждого IP приложение отправляет ICMP ping через `Ping.SendPingAsync`, проверяет TCP-порт `3389` и пытается получить RDP-сертификат. Строка считается `В сети`, если хотя бы один IP отвечает на ping и у него открыт `3389`. Сертификат используется как дополнительная диагностика и источник имени, но его отсутствие само по себе не делает сервер недоступным. В журнал событий пишется подробный результат по каждому IP.
 
 ### Как работает проверка IP
 
@@ -237,7 +237,7 @@ The public repository does not store the real server list. If a local `default_s
 
 This file is not overwritten after network scans and is not populated automatically. It can be changed only manually in the user profile or through the `Сервера` tab context menu: `Копировать`, `Добавить`, `Редактировать`, `Удалить`, `Проверить`.
 
-Server checking is performed for every IP address in the row. For each IP, the application sends an ICMP ping through `Ping.SendPingAsync` and tries to read the RDP certificate on TCP port `3389`. A row is marked online when at least one IP replies to ping and provides a `3389` certificate. The event log records a detailed result for each IP address.
+Server checking is performed for every IP address in the row. For each IP, the application sends an ICMP ping through `Ping.SendPingAsync`, checks TCP port `3389`, and tries to read the RDP certificate. A row is marked online when at least one IP replies to ping and has `3389` open. The certificate is used as extra diagnostics and a hostname source, but failure to read it does not by itself make the server unavailable. The event log records a detailed result for each IP address.
 
 ### How IP Checks Work
 

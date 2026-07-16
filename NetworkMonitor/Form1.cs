@@ -544,7 +544,7 @@ public partial class Form1 : Form
         server.LastDevices = devices;
         server.LastPingResults = serverPingResults;
         server.IsOnline = devices.Any(device =>
-            device.RdpCertificateResponded
+            device.IsOnline
             && serverPingResults.TryGetValue(device.IpAddress, out var pingOk)
             && pingOk);
         server.CheckedAt = DateTime.Now;
@@ -606,7 +606,7 @@ public partial class Form1 : Form
     private static string FormatDefaultServerIpLog(DefaultServerEndpoint server, NetworkDevice device)
     {
         var pingOk = server.LastPingResults.TryGetValue(device.IpAddress, out var isPingOnline) && isPingOnline;
-        var status = device.RdpCertificateResponded && pingOk ? "В сети" : "Недоступен";
+        var status = device.IsOnline && pingOk ? "В сети" : "Недоступен";
         var pingText = pingOk ? "ping OK" : "ping нет";
         var certificateText = device.RdpCertificateResponded
             ? string.IsNullOrWhiteSpace(device.RdpCertificateName)
