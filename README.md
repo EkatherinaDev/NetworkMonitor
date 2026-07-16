@@ -62,7 +62,7 @@ Network Monitor - Windows-приложение для контроля дост�
 
 Для просмотра сохраненных логов есть отдельная вкладка `Логи`. По умолчанию она показывает последние 500 записей из файлов в `%AppData%\NetworkMonitor\logs`. Доступны фильтры:
 
-- `Сервер/IP` - одно или несколько имен/IP через пробел, запятую или `;`;
+- `Имя/IP` - одно или несколько имен, DNS-имен или IP через пробел, запятую или `;`;
 - `Текст` - поиск по содержимому записи;
 - `Тип` - все события, ошибки, серверы, сервисы, сканирование сети, ручные проверки, автопроверка, изменения статуса;
 - `С` и `По` - временной промежуток, если включены галочки у дат;
@@ -174,6 +174,8 @@ IP-адреса серверов, которые были найдены или 
 Таблица сервисов доступна только для просмотра. Чтобы изменить строку, нажмите по ней правой кнопкой мыши и выберите `Редактировать`, `Удалить`, `Сканировать` или `Копировать`. Отдельной кнопки сохранения нет: список сохраняется автоматически после добавления, редактирования или удаления.
 
 В одной строке можно указать несколько DNS-имен или IP через `;`; приложение проверит их по очереди и покажет первый IPv4, который ответил на ping.
+
+После каждой проверки сервисов в журнал и файл логов записывается отдельная строка по каждому сервису. Формат содержит название, DNS/IP, найденный IPv4, статус и детали: `Сервис 98 корпус (172.16.98.1): Недоступен, IPv4: 172.16.98.1, Нет ответа ping.` Поэтому на вкладке `Логи` можно найти недоступность конкретного сервиса по названию, DNS-имени или IP-адресу.
 
 Дефолтный список сервисов хранится отдельно от кода:
 
@@ -293,7 +295,7 @@ The file is stored in the user profile, not next to the EXE under `Program Files
 
 Saved logs can be viewed on the separate `Логи` tab. By default, it shows the latest 500 entries from `%AppData%\NetworkMonitor\logs`. Available filters:
 
-- `Сервер/IP` - one or more hostnames/IP addresses separated by spaces, commas, or `;`;
+- `Имя/IP` - one or more names, DNS names, or IP addresses separated by spaces, commas, or `;`;
 - `Текст` - full-text search inside log messages;
 - `Тип` - all events, errors, servers, services, network scans, manual checks, automatic checks, status changes;
 - `С` and `По` - a time range when the date checkboxes are enabled;
@@ -407,6 +409,8 @@ The `Проверить` button searches for the entered DNS/IP in the service l
 The services table is read-only. To change a row, right-click it and choose `Редактировать`, `Удалить`, `Сканировать`, or `Копировать`. There is no separate save button: the list is saved automatically after add, edit, or delete actions.
 
 One row may contain several DNS names or IP addresses separated by `;`; the application tries them in order and displays the first IPv4 address that replies to ping.
+
+After every service check, the event log and log file receive a separate entry for each service. The format contains the service name, DNS/IP, resolved IPv4, status, and details: `Сервис 98 корпус (172.16.98.1): Недоступен, IPv4: 172.16.98.1, Нет ответа ping.` This makes the `Логи` tab searchable by service name, DNS name, or IP address when investigating service downtime.
 
 The default service list is stored separately from code:
 

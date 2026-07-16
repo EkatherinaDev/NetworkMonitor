@@ -1000,7 +1000,7 @@ public partial class Form1 : Form
         {
             AutoSize = true,
             Margin = new Padding(0, 7, 8, 0),
-            Text = "Сервер/IP:"
+            Text = "Имя/IP:"
         });
 
         logServerFilterTextBox = new TextBox
@@ -1238,6 +1238,11 @@ public partial class Form1 : Form
 
             RenderServices();
 
+            foreach (var service in results.OrderBy(service => service.Name, StringComparer.CurrentCultureIgnoreCase))
+            {
+                AddEventLog(FormatServiceCheckLog(service));
+            }
+
             var onlineCount = results.Count(service => service.IsOnline);
             var offlineCount = results.Count - onlineCount;
             statusLabel.Text = $"Проверка сервисов завершена. В сети: {onlineCount}, недоступно: {offlineCount}";
@@ -1259,6 +1264,21 @@ public partial class Form1 : Form
             SetServiceCheckState(true);
             _serviceCheckInProgress = false;
         }
+    }
+
+    private static string FormatServiceCheckLog(ServiceEndpoint service)
+    {
+        var address = string.IsNullOrWhiteSpace(service.Address)
+            ? "адрес не указан"
+            : service.Address;
+        var resolvedIp = string.IsNullOrWhiteSpace(service.ResolvedIp)
+            ? "IPv4 не найден"
+            : service.ResolvedIp;
+        var details = string.IsNullOrWhiteSpace(service.Details)
+            ? "без деталей"
+            : service.Details;
+
+        return $"Сервис {service.Name} ({address}): {service.StatusText}, IPv4: {resolvedIp}, {details}.";
     }
 
     private void SetServiceCheckState(bool enabled)
