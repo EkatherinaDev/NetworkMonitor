@@ -52,6 +52,22 @@ Network Monitor - Windows-приложение для контроля дост�
 
 В нижней части окна есть `Журнал событий мониторинга`. В него пишутся запуск и завершение проверок, найденные серверы, ручные проверки, ошибки и изменения статуса устройств.
 
+Окно журнала хранит последние 500 записей, чтобы интерфейс не разрастался бесконечно. Те же события дополнительно записываются в дневной UTF-8 файл:
+
+```text
+%AppData%\NetworkMonitor\logs\monitoring-YYYY-MM-DD.log
+```
+
+Файл находится в профиле пользователя, а не рядом с EXE в `Program Files`, поэтому приложение может писать логи без прав администратора. Если запись в файл не удалась, мониторинг и обновление интерфейса продолжаются.
+
+Для просмотра сохраненных логов есть отдельная вкладка `Логи`. По умолчанию она показывает последние 500 записей из файлов в `%AppData%\NetworkMonitor\logs`. Доступны фильтры:
+
+- `Сервер/IP` - одно или несколько имен/IP через пробел, запятую или `;`;
+- `Текст` - поиск по содержимому записи;
+- `Тип` - все события, ошибки, серверы, сервисы, сканирование сети, ручные проверки, автопроверка, изменения статуса;
+- `С` и `По` - временной промежуток, если включены галочки у дат;
+- `Только недоступные` - показывает записи, где есть недоступность сервера/IP.
+
 При проверке выбранной строки таблицы журнал пишет подробный результат по каждому IP из этой строки. Формат: сначала `Проверка <имя>:`, затем отдельные строки вида `192.168.1.10: В сети, порты: 80, 389, 3389`, `192.168.1.11: Недоступен, порты: 80, 443` или `192.168.1.12: Недоступен, открытых портов нет`.
 
 ### Как определяется имя устройства
@@ -266,6 +282,22 @@ Double-clicking a table row checks that row. If the row contains several IP addr
 Right-clicking a row on the `Сеть` tab opens a context menu: `Копировать`, `Редактировать`, `Удалить`, `Проверить`. For a grouped row, edit, delete, and check actions apply to all IP addresses inside that row.
 
 The lower part of the window contains the monitoring event log. It records scan starts and finishes, discovered servers, manual checks, errors, and device status changes.
+
+The UI log keeps the last 500 entries so the window does not grow indefinitely. The same events are also appended to a daily UTF-8 log file:
+
+```text
+%AppData%\NetworkMonitor\logs\monitoring-YYYY-MM-DD.log
+```
+
+The file is stored in the user profile, not next to the EXE under `Program Files`, so the application can write logs without administrator rights. If file logging fails, monitoring and UI updates continue.
+
+Saved logs can be viewed on the separate `Логи` tab. By default, it shows the latest 500 entries from `%AppData%\NetworkMonitor\logs`. Available filters:
+
+- `Сервер/IP` - one or more hostnames/IP addresses separated by spaces, commas, or `;`;
+- `Текст` - full-text search inside log messages;
+- `Тип` - all events, errors, servers, services, network scans, manual checks, automatic checks, status changes;
+- `С` and `По` - a time range when the date checkboxes are enabled;
+- `Только недоступные` - only entries that report server/IP unavailability.
 
 When a selected table row is checked, the event log records a detailed result for each IP address in that row. The format is `Проверка <name>:` followed by lines such as `192.168.1.10: В сети, порты: 80, 389, 3389`, `192.168.1.11: Недоступен, порты: 80, 443`, or `192.168.1.12: Недоступен, открытых портов нет`.
 

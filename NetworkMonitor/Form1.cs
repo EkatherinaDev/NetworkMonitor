@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 
@@ -6,6 +8,7 @@ namespace NetworkMonitor;
 public partial class Form1 : Form
 {
     private const int MaxEventLogItems = 500;
+    private const int MaxLogViewerItems = 500;
     private static readonly char[] IpAddressSeparators = [';', ',', '\r', '\n', '\t', ' '];
     private static readonly char[] ServiceAddressSeparators = [';', ',', '\r', '\n', '\t'];
 
@@ -16,6 +19,10 @@ public partial class Form1 : Form
     private readonly DefaultServerStore _defaultServerStore = new();
     private readonly ServiceEndpointStore _serviceEndpointStore = new();
     private readonly Dictionary<string, NetworkDevice> _devices = new(StringComparer.OrdinalIgnoreCase);
+    private readonly string _eventLogDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "NetworkMonitor",
+        "logs");
     private readonly List<string> _manualIpAddresses;
     private readonly List<string> _serverIpAddresses;
     private readonly List<DefaultServerEndpoint> _defaultServers;
@@ -30,14 +37,28 @@ public partial class Form1 : Form
     private TabControl mainTabs = null!;
     private DataGridView defaultServersGrid = null!;
     private DataGridView servicesGrid = null!;
+    private DataGridView logsGrid = null!;
+    private TabPage logsTab = null!;
     private Button checkDefaultServersButton = null!;
     private TextBox serviceSearchTextBox = null!;
+    private TextBox logServerFilterTextBox = null!;
+    private TextBox logTextFilterTextBox = null!;
+    private DateTimePicker logFromDateTimePicker = null!;
+    private DateTimePicker logToDateTimePicker = null!;
+    private CheckBox logUnavailableOnlyCheckBox = null!;
+    private ComboBox logEventTypeComboBox = null!;
+    private Label logViewerStatusLabel = null!;
     private Button checkServiceSearchButton = null!;
     private Button checkServicesButton = null!;
+    private Button applyLogFiltersButton = null!;
+    private Button resetLogFiltersButton = null!;
+    private Button refreshLogsButton = null!;
+    private Button openLogsFolderButton = null!;
     private ContextMenuStrip deviceContextMenu = null!;
     private ContextMenuStrip defaultServerContextMenu = null!;
     private ContextMenuStrip serviceContextMenu = null!;
     private ContextMenuStrip eventLogContextMenu = null!;
+    private ContextMenuStrip logsGridContextMenu = null!;
     private ToolStripMenuItem copyDeviceCellMenuItem = null!;
     private ToolStripMenuItem editDeviceMenuItem = null!;
     private ToolStripMenuItem deleteDeviceMenuItem = null!;
@@ -49,6 +70,7 @@ public partial class Form1 : Form
     private ToolStripMenuItem checkDefaultServerMenuItem = null!;
     private ToolStripMenuItem copyServiceCellMenuItem = null!;
     private ToolStripMenuItem copyEventLogMenuItem = null!;
+    private ToolStripMenuItem copyLogCellMenuItem = null!;
     private ToolStripMenuItem editServiceMenuItem = null!;
     private ToolStripMenuItem deleteServiceMenuItem = null!;
     private ToolStripMenuItem scanServiceMenuItem = null!;
@@ -64,7 +86,9 @@ public partial class Form1 : Form
         ConfigureGrid();
         ConfigureDefaultServersGrid();
         ConfigureServicesGrid();
+        ConfigureLogsGrid();
         ConfigureEventLogCopy();
+        RefreshLogViewer();
         RenderDefaultServers();
         RenderServices();
 
@@ -186,9 +210,14 @@ public partial class Form1 : Form
         var servicesTab = new TabPage("Сервисы");
         servicesTab.Controls.Add(BuildServicesLayout());
 
+        logsTab = new TabPage("Логи");
+        logsTab.Controls.Add(BuildLogsLayout());
+
         mainTabs.TabPages.Add(defaultServersTab);
         mainTabs.TabPages.Add(networkTab);
         mainTabs.TabPages.Add(servicesTab);
+        mainTabs.TabPages.Add(logsTab);
+        mainTabs.SelectedIndexChanged += mainTabs_SelectedIndexChanged;
         mainTabs.SelectedIndex = 0;
 
         rootLayout.Controls.Add(mainTabs, 0, 1);
@@ -946,6 +975,228 @@ public partial class Form1 : Form
         servicesGrid.ResumeLayout();
     }
 
+    private Control BuildLogsLayout()
+    {
+        var logsLayout = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(0)
+        };
+        logsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        logsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        logsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        logsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var filtersPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 8, 0, 8),
+            WrapContents = true
+        };
+
+        filtersPanel.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 7, 8, 0),
+            Text = "Сервер/IP:"
+        });
+
+        logServerFilterTextBox = new TextBox
+        {
+            Margin = new Padding(0, 3, 12, 3),
+            PlaceholderText = "SERVER-GB1; 10.0.5.68",
+            Size = new Size(220, 27)
+        };
+        logServerFilterTextBox.KeyDown += logFilterTextBox_KeyDown;
+        filtersPanel.Controls.Add(logServerFilterTextBox);
+
+        filtersPanel.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 7, 8, 0),
+            Text = "Текст:"
+        });
+
+        logTextFilterTextBox = new TextBox
+        {
+            Margin = new Padding(0, 3, 12, 3),
+            PlaceholderText = "ошибка, порт, сервис...",
+            Size = new Size(210, 27)
+        };
+        logTextFilterTextBox.KeyDown += logFilterTextBox_KeyDown;
+        filtersPanel.Controls.Add(logTextFilterTextBox);
+
+        filtersPanel.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 7, 8, 0),
+            Text = "Тип:"
+        });
+
+        logEventTypeComboBox = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Margin = new Padding(0, 3, 12, 3),
+            Size = new Size(180, 28)
+        };
+        logEventTypeComboBox.Items.AddRange([
+            "Все события",
+            "Ошибки",
+            "Серверы",
+            "Сервисы",
+            "Сканирование сети",
+            "Ручные проверки",
+            "Автопроверка",
+            "Изменения статуса"
+        ]);
+        logEventTypeComboBox.SelectedIndex = 0;
+        filtersPanel.Controls.Add(logEventTypeComboBox);
+
+        filtersPanel.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 7, 8, 0),
+            Text = "С:"
+        });
+
+        logFromDateTimePicker = new DateTimePicker
+        {
+            CustomFormat = "dd.MM.yyyy HH:mm",
+            Format = DateTimePickerFormat.Custom,
+            Margin = new Padding(0, 3, 12, 3),
+            ShowCheckBox = true,
+            Size = new Size(185, 27),
+            Value = DateTime.Today
+        };
+        logFromDateTimePicker.Checked = false;
+        filtersPanel.Controls.Add(logFromDateTimePicker);
+
+        filtersPanel.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 7, 8, 0),
+            Text = "По:"
+        });
+
+        logToDateTimePicker = new DateTimePicker
+        {
+            CustomFormat = "dd.MM.yyyy HH:mm",
+            Format = DateTimePickerFormat.Custom,
+            Margin = new Padding(0, 3, 12, 3),
+            ShowCheckBox = true,
+            Size = new Size(185, 27),
+            Value = DateTime.Now
+        };
+        logToDateTimePicker.Checked = false;
+        filtersPanel.Controls.Add(logToDateTimePicker);
+
+        logUnavailableOnlyCheckBox = new CheckBox
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 6, 12, 0),
+            Text = "Только недоступные"
+        };
+        filtersPanel.Controls.Add(logUnavailableOnlyCheckBox);
+
+        applyLogFiltersButton = new Button
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 2, 8, 2),
+            Text = "Применить",
+            UseVisualStyleBackColor = true
+        };
+        applyLogFiltersButton.Click += (_, _) => RefreshLogViewer();
+        filtersPanel.Controls.Add(applyLogFiltersButton);
+
+        resetLogFiltersButton = new Button
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 2, 8, 2),
+            Text = "Сбросить",
+            UseVisualStyleBackColor = true
+        };
+        resetLogFiltersButton.Click += (_, _) => ResetLogFilters();
+        filtersPanel.Controls.Add(resetLogFiltersButton);
+
+        refreshLogsButton = new Button
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 2, 8, 2),
+            Text = "Обновить",
+            UseVisualStyleBackColor = true
+        };
+        refreshLogsButton.Click += (_, _) => RefreshLogViewer();
+        filtersPanel.Controls.Add(refreshLogsButton);
+
+        openLogsFolderButton = new Button
+        {
+            AutoSize = true,
+            Margin = new Padding(0, 2, 0, 2),
+            Text = "Открыть папку",
+            UseVisualStyleBackColor = true
+        };
+        openLogsFolderButton.Click += (_, _) => OpenLogsFolder();
+        filtersPanel.Controls.Add(openLogsFolderButton);
+
+        logsGrid = new DataGridView
+        {
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AllowUserToResizeRows = false,
+            BackgroundColor = SystemColors.Window,
+            BorderStyle = BorderStyle.Fixed3D,
+            ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText,
+            ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize,
+            Dock = DockStyle.Fill,
+            EditMode = DataGridViewEditMode.EditProgrammatically,
+            Margin = new Padding(0),
+            MultiSelect = false,
+            ReadOnly = true,
+            RowHeadersWidth = 48,
+            RowTemplate = { Height = 28 },
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect
+        };
+        logsGridContextMenu = BuildLogsGridContextMenu();
+        logsGrid.ContextMenuStrip = logsGridContextMenu;
+        logsGrid.KeyDown += dataGridView_KeyDown;
+        logsGrid.MouseDown += logsGrid_MouseDown;
+
+        logViewerStatusLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            ForeColor = Color.DimGray,
+            Margin = new Padding(0, 8, 0, 0),
+            Text = "Логи не загружены.",
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+
+        logsLayout.Controls.Add(filtersPanel, 0, 0);
+        logsLayout.Controls.Add(logsGrid, 0, 1);
+        logsLayout.Controls.Add(logViewerStatusLabel, 0, 2);
+        return logsLayout;
+    }
+
+    private ContextMenuStrip BuildLogsGridContextMenu()
+    {
+        var contextMenu = new ContextMenuStrip();
+        copyLogCellMenuItem = new ToolStripMenuItem("Копировать");
+        copyLogCellMenuItem.Click += (_, _) => CopyCurrentGridCell(logsGrid);
+        contextMenu.Items.Add(copyLogCellMenuItem);
+        contextMenu.Opening += (_, e) => e.Cancel = logsGrid.CurrentCell is null;
+        return contextMenu;
+    }
+
+    private void ConfigureLogsGrid()
+    {
+        logsGrid.Columns.Clear();
+        logsGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Timestamp", HeaderText = "Время", Width = 170, ReadOnly = true });
+        logsGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Message", HeaderText = "Событие", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 420, ReadOnly = true });
+        logsGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "File", HeaderText = "Файл", Width = 190, ReadOnly = true });
+    }
+
     private void SaveServices()
     {
         _serviceEndpointStore.Save(_services);
@@ -1538,13 +1789,339 @@ public partial class Form1 : Form
 
     private void AddEventLog(string message)
     {
+        var now = DateTime.Now;
+        var displayLine = $"[{now:HH:mm:ss}] {message}";
+        var fileLine = $"[{now:yyyy-MM-dd HH:mm:ss}] {message}";
+
         if (eventLogListBox.Items.Count >= MaxEventLogItems)
         {
             eventLogListBox.Items.RemoveAt(0);
         }
 
-        eventLogListBox.Items.Add($"[{DateTime.Now:HH:mm:ss}] {message}");
+        eventLogListBox.Items.Add(displayLine);
         eventLogListBox.TopIndex = eventLogListBox.Items.Count - 1;
+        AppendEventLogToFile(fileLine, now);
+
+        if (ReferenceEquals(mainTabs.SelectedTab, logsTab))
+        {
+            RefreshLogViewer();
+        }
+    }
+
+    private void AppendEventLogToFile(string line, DateTime timestamp)
+    {
+        try
+        {
+            Directory.CreateDirectory(_eventLogDirectory);
+            var logFilePath = Path.Combine(_eventLogDirectory, $"monitoring-{timestamp:yyyy-MM-dd}.log");
+            File.AppendAllText(logFilePath, line + Environment.NewLine, System.Text.Encoding.UTF8);
+        }
+        catch
+        {
+            // Logging must never interrupt monitoring or UI updates.
+        }
+    }
+
+    private void RefreshLogViewer()
+    {
+        var entries = LoadMonitoringLogEntries();
+        var filteredEntries = entries.Where(MatchesLogFilters).ToList();
+        var firstDisplayedIndex = Math.Max(0, filteredEntries.Count - MaxLogViewerItems);
+        var displayedEntries = filteredEntries.Skip(firstDisplayedIndex).ToList();
+
+        RenderLogViewer(displayedEntries);
+
+        if (filteredEntries.Count == 0)
+        {
+            logViewerStatusLabel.Text = entries.Count == 0
+                ? $"Файлы логов не найдены: {_eventLogDirectory}"
+                : $"Записей по текущим фильтрам не найдено. Всего в файлах: {entries.Count}.";
+            return;
+        }
+
+        var range = $"{displayedEntries[0].Timestamp:yyyy-MM-dd HH:mm:ss} - {displayedEntries[^1].Timestamp:yyyy-MM-dd HH:mm:ss}";
+        logViewerStatusLabel.Text = $"Показано {displayedEntries.Count} последних записей из {filteredEntries.Count} найденных. Всего в файлах: {entries.Count}. Период: {range}.";
+    }
+
+    private List<MonitoringLogEntry> LoadMonitoringLogEntries()
+    {
+        var entries = new List<MonitoringLogEntry>();
+
+        if (!Directory.Exists(_eventLogDirectory))
+        {
+            return entries;
+        }
+
+        foreach (var filePath in Directory.EnumerateFiles(_eventLogDirectory, "monitoring-*.log")
+                     .OrderBy(filePath => filePath, StringComparer.OrdinalIgnoreCase))
+        {
+            var currentContext = "";
+
+            try
+            {
+                foreach (var line in File.ReadLines(filePath, System.Text.Encoding.UTF8))
+                {
+                    if (!TryParseMonitoringLogLine(line, out var timestamp, out var message))
+                    {
+                        continue;
+                    }
+
+                    var entryContext = currentContext;
+                    if (TryExtractLogContext(message, out var newContext))
+                    {
+                        currentContext = newContext;
+                        entryContext = newContext;
+                    }
+
+                    entries.Add(new MonitoringLogEntry(
+                        timestamp,
+                        message,
+                        entryContext,
+                        Path.GetFileName(filePath)));
+                }
+            }
+            catch
+            {
+                // A broken or locked log file should not break the log viewer.
+            }
+        }
+
+        return entries;
+    }
+
+    private static bool TryParseMonitoringLogLine(string line, out DateTime timestamp, out string message)
+    {
+        timestamp = default;
+        message = "";
+
+        if (string.IsNullOrWhiteSpace(line) || line[0] != '[')
+        {
+            return false;
+        }
+
+        var closingBracketIndex = line.IndexOf(']');
+        if (closingBracketIndex < 0)
+        {
+            return false;
+        }
+
+        var timestampText = line[1..closingBracketIndex];
+        if (!DateTime.TryParseExact(
+                timestampText,
+                "yyyy-MM-dd HH:mm:ss",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeLocal,
+                out timestamp))
+        {
+            return false;
+        }
+
+        message = line[(closingBracketIndex + 1)..].TrimStart();
+        return message.Length > 0;
+    }
+
+    private static bool TryExtractLogContext(string message, out string context)
+    {
+        const string prefix = "Проверка ";
+        context = "";
+
+        if (!message.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !message.EndsWith(':'))
+        {
+            return false;
+        }
+
+        context = message[prefix.Length..^1].Trim();
+        return context.Length > 0;
+    }
+
+    private bool MatchesLogFilters(MonitoringLogEntry entry)
+    {
+        if (logFromDateTimePicker.Checked && entry.Timestamp < logFromDateTimePicker.Value)
+        {
+            return false;
+        }
+
+        if (logToDateTimePicker.Checked && entry.Timestamp > logToDateTimePicker.Value)
+        {
+            return false;
+        }
+
+        var serverTerms = SplitLogFilterTerms(logServerFilterTextBox.Text);
+        if (serverTerms.Count > 0 && !serverTerms.Any(term => MatchesLogServerTerm(entry, term)))
+        {
+            return false;
+        }
+
+        var textFilter = logTextFilterTextBox.Text.Trim();
+        if (textFilter.Length > 0
+            && !entry.Message.Contains(textFilter, StringComparison.OrdinalIgnoreCase)
+            && !entry.Context.Contains(textFilter, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (logUnavailableOnlyCheckBox.Checked && !IsUnavailableLogMessage(entry.Message))
+        {
+            return false;
+        }
+
+        return MatchesLogEventType(entry.Message, Convert.ToString(logEventTypeComboBox.SelectedItem));
+    }
+
+    private static List<string> SplitLogFilterTerms(string value)
+    {
+        return value
+            .Split(IpAddressSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static bool MatchesLogServerTerm(MonitoringLogEntry entry, string term)
+    {
+        return entry.Message.Contains(term, StringComparison.OrdinalIgnoreCase)
+            || (IsIpDetailLogMessage(entry.Message)
+                && entry.Context.Contains(term, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsIpDetailLogMessage(string message)
+    {
+        var separatorIndex = message.IndexOf(':');
+        return separatorIndex > 0
+            && IPAddress.TryParse(message[..separatorIndex].Trim(), out _);
+    }
+
+    private static bool IsUnavailableLogMessage(string message)
+    {
+        var lowerMessage = message.ToLowerInvariant();
+
+        if (lowerMessage.Contains("недоступен")
+            || lowerMessage.Contains("недоступна")
+            || lowerMessage.Contains("недоступны"))
+        {
+            return true;
+        }
+
+        var markerIndex = lowerMessage.IndexOf("недоступно", StringComparison.Ordinal);
+        if (markerIndex < 0)
+        {
+            return false;
+        }
+
+        var digitIndex = markerIndex + "недоступно".Length;
+        while (digitIndex < lowerMessage.Length && !char.IsDigit(lowerMessage[digitIndex]))
+        {
+            digitIndex++;
+        }
+
+        if (digitIndex >= lowerMessage.Length)
+        {
+            return true;
+        }
+
+        var numberEndIndex = digitIndex;
+        while (numberEndIndex < lowerMessage.Length && char.IsDigit(lowerMessage[numberEndIndex]))
+        {
+            numberEndIndex++;
+        }
+
+        return int.TryParse(lowerMessage[digitIndex..numberEndIndex], out var unavailableCount)
+            && unavailableCount > 0;
+    }
+
+    private static bool MatchesLogEventType(string message, string? eventType)
+    {
+        if (string.IsNullOrWhiteSpace(eventType) || eventType == "Все события")
+        {
+            return true;
+        }
+
+        return eventType switch
+        {
+            "Ошибки" => message.Contains("ошибка", StringComparison.OrdinalIgnoreCase),
+            "Серверы" => message.Contains("сервер", StringComparison.OrdinalIgnoreCase),
+            "Сервисы" => message.Contains("сервис", StringComparison.OrdinalIgnoreCase),
+            "Сканирование сети" => message.Contains("сканирован", StringComparison.OrdinalIgnoreCase),
+            "Ручные проверки" => message.Contains("ручн", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("вручную", StringComparison.OrdinalIgnoreCase),
+            "Автопроверка" => message.Contains("автопровер", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("автомат", StringComparison.OrdinalIgnoreCase),
+            "Изменения статуса" => message.Contains("стал недоступен", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("добавлен", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("изменен", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("удален", StringComparison.OrdinalIgnoreCase),
+            _ => true
+        };
+    }
+
+    private void RenderLogViewer(IReadOnlyList<MonitoringLogEntry> entries)
+    {
+        logsGrid.SuspendLayout();
+        logsGrid.Rows.Clear();
+
+        foreach (var entry in entries)
+        {
+            var rowIndex = logsGrid.Rows.Add(
+                entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"),
+                entry.Message,
+                entry.FileName);
+
+            var row = logsGrid.Rows[rowIndex];
+            row.Tag = entry;
+
+            if (IsUnavailableLogMessage(entry.Message))
+            {
+                row.DefaultCellStyle.ForeColor = Color.Firebrick;
+            }
+            else if (entry.Message.Contains("ошибка", StringComparison.OrdinalIgnoreCase))
+            {
+                row.DefaultCellStyle.ForeColor = Color.DarkRed;
+            }
+            else if (entry.Message.Contains("В сети", StringComparison.OrdinalIgnoreCase))
+            {
+                row.DefaultCellStyle.ForeColor = Color.ForestGreen;
+            }
+        }
+
+        if (logsGrid.Rows.Count > 0)
+        {
+            logsGrid.ClearSelection();
+            var lastRow = logsGrid.Rows[logsGrid.Rows.Count - 1];
+            lastRow.Selected = true;
+            logsGrid.CurrentCell = lastRow.Cells[0];
+            logsGrid.FirstDisplayedScrollingRowIndex = lastRow.Index;
+        }
+
+        logsGrid.ResumeLayout();
+    }
+
+    private void ResetLogFilters()
+    {
+        logServerFilterTextBox.Clear();
+        logTextFilterTextBox.Clear();
+        logEventTypeComboBox.SelectedIndex = 0;
+        logUnavailableOnlyCheckBox.Checked = false;
+        logFromDateTimePicker.Checked = false;
+        logFromDateTimePicker.Value = DateTime.Today;
+        logToDateTimePicker.Checked = false;
+        logToDateTimePicker.Value = DateTime.Now;
+        RefreshLogViewer();
+    }
+
+    private void OpenLogsFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(_eventLogDirectory);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = _eventLogDirectory,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Не удалось открыть папку логов: {ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void AddDeviceCheckDetailsToEventLog(string title, IEnumerable<NetworkDevice> devices)
@@ -2105,6 +2682,36 @@ public partial class Form1 : Form
         e.Handled = true;
     }
 
+    private void mainTabs_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (ReferenceEquals(mainTabs.SelectedTab, logsTab))
+        {
+            RefreshLogViewer();
+        }
+    }
+
+    private void logFilterTextBox_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.Enter)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+        RefreshLogViewer();
+    }
+
+    private void logsGrid_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right)
+        {
+            return;
+        }
+
+        SelectGridCellAtMouse(logsGrid, e);
+    }
+
     private async void checkDefaultServersButton_Click(object? sender, EventArgs e)
     {
         await RunDefaultServerChecksAsync(_defaultServers, "Ручная проверка серверов");
@@ -2338,4 +2945,9 @@ public partial class Form1 : Form
         e.Handled = true;
     }
 
+    private sealed record MonitoringLogEntry(
+        DateTime Timestamp,
+        string Message,
+        string Context,
+        string FileName);
 }

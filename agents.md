@@ -55,7 +55,7 @@
 
 Сканирование должно оставаться асинхронным. Не блокируйте UI-поток ожиданием ping, DNS, ARP или TCP-портов.
 
-Журнал событий мониторинга находится в `Form1` и отображается через `eventLogListBox`. В журнал нужно писать запуск и завершение проверок, ошибки, найденные серверы и изменения статуса.
+Журнал событий мониторинга находится в `Form1` и отображается через `eventLogListBox`. В журнал нужно писать запуск и завершение проверок, ошибки, найденные серверы и изменения статуса. `AddEventLog` должен писать каждую запись и в интерфейс, и в дневной UTF-8 файл `%AppData%\NetworkMonitor\logs\monitoring-YYYY-MM-DD.log`. В интерфейсе хранится не больше `MaxEventLogItems` записей; файловые логи должны сохраняться после перезапуска приложения. Ошибка записи в файл не должна прерывать мониторинг или обновление UI. Отдельная вкладка `Логи` читает эти файлы и по умолчанию показывает последние `MaxLogViewerItems` записей. Фильтры вкладки должны поддерживать сервер/IP, текст, тип события, временной промежуток и режим `Только недоступные`.
 
 При ручной проверке выбранной строки `devicesGrid` нужно логировать подробности по каждому IP из строки: заголовок `Проверка <имя>:` и отдельные записи `IP: В сети, порты: ...`, `IP: Недоступен, порты: ...` или `IP: Недоступен, открытых портов нет`. Для этого используется `Form1.AddDeviceCheckDetailsToEventLog`.
 
@@ -237,7 +237,7 @@ Automatic checking is started by a WinForms timer in `Form1`: the interval is 10
 
 Scanning must remain asynchronous. Do not block the UI thread while waiting for ping, DNS, ARP, or TCP port checks.
 
-The monitoring event log is owned by `Form1` and displayed through `eventLogListBox`. It should record check starts and finishes, errors, discovered servers, and status changes.
+The monitoring event log is owned by `Form1` and displayed through `eventLogListBox`. It should record check starts and finishes, errors, discovered servers, and status changes. `AddEventLog` must write each entry both to the UI and to the daily UTF-8 file `%AppData%\NetworkMonitor\logs\monitoring-YYYY-MM-DD.log`. The UI keeps at most `MaxEventLogItems` entries; file logs must persist across application restarts. File logging failures must not interrupt monitoring or UI updates. The separate `Логи` tab reads these files and shows the latest `MaxLogViewerItems` entries by default. The tab filters should support server/IP, text, event type, time range, and `Только недоступные` mode.
 
 When a selected `devicesGrid` row is checked manually, log details for each IP address in that row: a `Проверка <name>:` header and separate `IP: В сети, порты: ...`, `IP: Недоступен, порты: ...`, or `IP: Недоступен, открытых портов нет` entries. This is handled by `Form1.AddDeviceCheckDetailsToEventLog`.
 
