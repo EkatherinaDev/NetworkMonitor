@@ -2108,10 +2108,31 @@ public partial class Form1 : Form
             var lastRow = logsGrid.Rows[logsGrid.Rows.Count - 1];
             lastRow.Selected = true;
             logsGrid.CurrentCell = lastRow.Cells[0];
-            logsGrid.FirstDisplayedScrollingRowIndex = lastRow.Index;
+            ScrollLogViewerToRow(lastRow.Index);
         }
 
         logsGrid.ResumeLayout();
+    }
+
+    private void ScrollLogViewerToRow(int rowIndex)
+    {
+        if (!logsGrid.IsHandleCreated || !logsGrid.Visible || rowIndex < 0 || rowIndex >= logsGrid.Rows.Count)
+        {
+            return;
+        }
+
+        try
+        {
+            logsGrid.FirstDisplayedScrollingRowIndex = rowIndex;
+        }
+        catch (InvalidOperationException)
+        {
+            // The log tab can be hidden or too small during startup/layout.
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // Rows can change while the viewer is being refreshed.
+        }
     }
 
     private void ResetLogFilters()
